@@ -1,4 +1,4 @@
-r"""Search everything you and TARS have said.  Usage:  python memory\search.py "words to find" [--days 30]"""
+r"""Search everything you and AIDA have said.  Usage:  python memory\search.py "words to find" [--days 30]"""
 import sys
 import sqlite3
 import pathlib

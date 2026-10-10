@@ -1,5 +1,5 @@
 """
-Safety hook for claude2claude voice (TARS).
+Safety hook for claude2claude voice (AIDA).
 Claude Code runs this before every tool call. Anything destructive, or anything
 that sends, posts or pays, is blocked unless the user has said "confirmed" in the
 last 3 minutes (voice_claude.py writes .confirm_token when they do).

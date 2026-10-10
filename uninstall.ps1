@@ -1,9 +1,9 @@
 <#
-.SYNOPSIS  Removes what install.ps1 added outside the TARS folder (shortcuts), and optionally the folder itself.
+.SYNOPSIS  Removes what install.ps1 added outside the AIDA folder (shortcuts), and optionally the folder itself.
 .DESCRIPTION
   Does NOT uninstall Python, Claude Code, Git or the GitHub CLI (you may use them for other things; remove them
   from Settings > Apps if you want). Your GitHub repo, if you made one, is untouched.
-  -RemoveFolder also deletes the TARS folder (venv, models, config.yaml AND your memory). Use -DryRun first.
+  -RemoveFolder also deletes the AIDA folder (venv, models, config.yaml AND your memory). Use -DryRun first.
 #>
 [CmdletBinding()]
 param([switch]$RemoveFolder, [Alias("WhatIf")][switch]$DryRun)
@@ -13,9 +13,9 @@ function Act($what, [scriptblock]$do) {
     if ($DryRun) { Write-Host "[dry-run] would: $what" -ForegroundColor DarkYellow } else { Write-Host $what; & $do }
 }
 $links = @(
-    (Join-Path ([Environment]::GetFolderPath("Desktop")) "TARS.lnk"),
-    (Join-Path ([Environment]::GetFolderPath("Programs")) "TARS.lnk"),
-    (Join-Path ([Environment]::GetFolderPath("Startup")) "TARS.lnk")
+    (Join-Path ([Environment]::GetFolderPath("Desktop")) "AIDA.lnk"),
+    (Join-Path ([Environment]::GetFolderPath("Programs")) "AIDA.lnk"),
+    (Join-Path ([Environment]::GetFolderPath("Startup")) "AIDA.lnk")
 )
 foreach ($l in $links) { if (Test-Path $l) { Act "remove shortcut $l" { Remove-Item $l -Force } } }
 

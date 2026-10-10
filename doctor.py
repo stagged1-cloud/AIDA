@@ -1,5 +1,5 @@
 """
-TARS self-check. Prints a PASS / WARN / FAIL checklist and exits non-zero if anything FAILED.
+AIDA self-check. Prints a PASS / WARN / FAIL checklist and exits non-zero if anything FAILED.
   .venv\\Scripts\\python.exe doctor.py              quick checks (no network, no Claude call)
   .venv\\Scripts\\python.exe doctor.py --claude     also asks Claude for one word to prove you are logged in
 """
@@ -30,7 +30,7 @@ def run(cmd, timeout=20):
 def main():
     os.system("")  # enable ANSI on Windows consoles
     want_claude = "--claude" in sys.argv
-    print("\nTARS self-check\n")
+    print("\nAIDA self-check\n")
 
     v = sys.version_info
     rec("PASS" if (3, 10) <= v[:2] <= (3, 13) else "WARN", f"Python {v.major}.{v.minor}.{v.micro}",
@@ -56,7 +56,7 @@ def main():
         if f.exists() and f.stat().st_size >= size:
             rec("PASS", f"voice model {name}", f"{f.stat().st_size / 1e6:.0f} MB")
         else:
-            rec("WARN", f"voice model {name} missing or incomplete", "TARS will use the Windows voice. Re-run install.ps1")
+            rec("WARN", f"voice model {name} missing or incomplete", "AIDA will use the Windows voice. Re-run install.ps1")
 
     try:
         import ctranslate2
@@ -99,7 +99,7 @@ def main():
                     rec("FAIL", "Claude login", "open a terminal, run:  claude   then complete the sign-in "
                         "with YOUR Claude account (type /login if asked)")
             else:
-                rec("INFO", "Claude login not tested", "run doctor.py --claude, or just start TARS")
+                rec("INFO", "Claude login not tested", "run doctor.py --claude, or just start AIDA")
     else:
         rec("FAIL", "Claude Code", "not found. Install: irm https://claude.ai/install.ps1 | iex")
 

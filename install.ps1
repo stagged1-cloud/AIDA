@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  TARS one-command installer for Windows 10/11. Safe to run again at any time (it only does what is missing).
+  AIDA one-command installer for Windows 10/11. Safe to run again at any time (it only does what is missing).
 
 .DESCRIPTION
   One line (PowerShell, no admin needed):
@@ -14,17 +14,17 @@
 
   Use -DryRun to see everything it WOULD do without changing anything.
 
-.PARAMETER InstallDir      Where TARS lives. Default: this folder if run from a checkout, else %USERPROFILE%\TARS.
+.PARAMETER InstallDir      Where AIDA lives. Default: this folder if run from a checkout, else %USERPROFILE%\AIDA.
 .PARAMETER Upstream        owner/repo of the project to install from (the "upstream" remote).
-.PARAMETER RepoName        Name of YOUR copy on your GitHub account. Default tars-assistant.
+.PARAMETER RepoName        Name of YOUR copy on your GitHub account. Default aida-assistant.
 .PARAMETER Visibility      private (default) or public, for your copy.
 .PARAMETER DryRun          Print what would happen; change nothing. (Alias: -WhatIf)
-.PARAMETER NoGitHub        Skip the GitHub step entirely (TARS works fine without it).
+.PARAMETER NoGitHub        Skip the GitHub step entirely (AIDA works fine without it).
 .PARAMETER NoWizard        Skip the first-run questions (config.yaml gets defaults).
 .PARAMETER SkipModels      Do not download the voice/speech models.
 .PARAMETER Cpu             Treat this PC as having no NVIDIA GPU (never try CUDA).
 .PARAMETER NoShortcut      Do not create Desktop / Start Menu shortcuts.
-.PARAMETER StartWithWindows  Also start TARS when you sign in to Windows.
+.PARAMETER StartWithWindows  Also start AIDA when you sign in to Windows.
 .PARAMETER SyncMemory      Opt in to pushing learned memory to YOUR OWN repo (never upstream).
 .PARAMETER Yes             Never ask questions; take the defaults.
 .PARAMETER SkipClaude      Do not install/check Claude Code.
@@ -34,7 +34,7 @@ param(
     [string]$InstallDir,
     [string]$Upstream = "stagged1-cloud/AIDA",
     [string]$Branch = "main",
-    [string]$RepoName = "tars-assistant",
+    [string]$RepoName = "aida-assistant",
     [ValidateSet("private", "public")][string]$Visibility = "private",
     [Alias("WhatIf")][switch]$DryRun,
     [switch]$NoGitHub,
@@ -50,10 +50,10 @@ param(
 
 $ErrorActionPreference = "Continue"      # native tools write to stderr; exit codes are checked by hand
 $ProgressPreference = "SilentlyContinue"
-if ($env:TARS_DRYRUN) { $DryRun = $true }
-if ($env:TARS_YES) { $Yes = $true }
-if ($env:TARS_DIR -and -not $InstallDir) { $InstallDir = $env:TARS_DIR }
-if ($env:TARS_UPSTREAM -and $Upstream -match '^OWNER/') { $Upstream = $env:TARS_UPSTREAM }
+if ($env:AIDA_DRYRUN) { $DryRun = $true }
+if ($env:AIDA_YES) { $Yes = $true }
+if ($env:AIDA_DIR -and -not $InstallDir) { $InstallDir = $env:AIDA_DIR }
+if ($env:AIDA_UPSTREAM -and $Upstream -match '^OWNER/') { $Upstream = $env:AIDA_UPSTREAM }
 
 $script:Checks = New-Object System.Collections.ArrayList
 $script:Next = New-Object System.Collections.ArrayList
@@ -104,25 +104,25 @@ function Git-Out { param([string[]]$a) $r = & git -C $script:Dir @a 2>$null; if 
 
 # ----------------------------------------------------------------------------- where am I
 Write-Host ""
-Write-Host "TARS installer" -ForegroundColor Green
+Write-Host "AIDA installer" -ForegroundColor Green
 if ($DryRun) { Write-Host "DRY RUN: nothing will be installed, downloaded, created or changed." -ForegroundColor Yellow }
 
 $here = $PSScriptRoot
 $inRepo = [bool]($here -and (Test-Path (Join-Path $here "voice_claude.py")))
-$explicit = $PSBoundParameters.ContainsKey("InstallDir") -or [bool]$env:TARS_DIR
-if (-not $InstallDir) { $InstallDir = if ($inRepo) { $here } else { Join-Path $env:USERPROFILE "TARS" } }
+$explicit = $PSBoundParameters.ContainsKey("InstallDir") -or [bool]$env:AIDA_DIR
+if (-not $InstallDir) { $InstallDir = if ($inRepo) { $here } else { Join-Path $env:USERPROFILE "AIDA" } }
 $InstallDir = [IO.Path]::GetFullPath($InstallDir)
 $script:Dir = $InstallDir
 
 Refresh-Path
-if (-not [Environment]::Is64BitOperatingSystem) { throw "TARS needs 64-bit Windows." }
-if ([Environment]::OSVersion.Version.Major -lt 10) { throw "TARS needs Windows 10 or 11." }
+if (-not [Environment]::Is64BitOperatingSystem) { throw "AIDA needs 64-bit Windows." }
+if ([Environment]::OSVersion.Version.Major -lt 10) { throw "AIDA needs Windows 10 or 11." }
 Add-Check "PASS" "Windows 64-bit, PowerShell $($PSVersionTable.PSVersion)" ""
 
 # ----------------------------------------------------------------------------- 0. get the project
 $needFetch = (-not $inRepo) -or ($explicit -and ($InstallDir.TrimEnd('\') -ne ([string]$here).TrimEnd('\')))
 if ($needFetch) {
-    Step "Getting TARS into $InstallDir"
+    Step "Getting AIDA into $InstallDir"
     $present = Test-Path (Join-Path $InstallDir "voice_claude.py")
     if ($present) { Info "Already there." }
     elseif ($inRepo) {
@@ -131,7 +131,7 @@ if ($needFetch) {
             & robocopy $here $InstallDir /E /XD .git .venv models __pycache__ logs tmp /XF config.yaml state.json /NFL /NDL /NJH /NJS | Out-Null
         } -Critical | Out-Null
     } else {
-        if ($Upstream -match '^OWNER/') { throw "Set the project to install from: -Upstream owner/repo (or `$env:TARS_UPSTREAM)." }
+        if ($Upstream -match '^OWNER/') { throw "Set the project to install from: -Upstream owner/repo (or `$env:AIDA_UPSTREAM)." }
         if (-not (Test-Online)) { throw "No internet connection (could not reach github.com). Connect and run this again." }
         if (-not (Have "git") -and (Have "winget")) {
             Info "Git is missing; installing it (the Git installer may ask for permission)."
@@ -145,7 +145,7 @@ if ($needFetch) {
             } -Critical | Out-Null
         } else {
             Act "download and unzip https://github.com/$Upstream/archive/refs/heads/$Branch.zip" {
-                $zip = Join-Path $env:TEMP "tars-src.zip"; $tmp = Join-Path $env:TEMP "tars-src"
+                $zip = Join-Path $env:TEMP "aida-src.zip"; $tmp = Join-Path $env:TEMP "aida-src"
                 Invoke-WebRequest "https://github.com/$Upstream/archive/refs/heads/$Branch.zip" -OutFile $zip -UseBasicParsing
                 if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
                 Expand-Archive $zip $tmp
@@ -231,7 +231,7 @@ if ($vc) { Add-Check "PASS" "Visual C++ runtime" "" }
 else {
     Info "The Visual C++ runtime is missing. Installing it needs ADMIN (Windows will ask for permission)."
     $ok = Act "winget install Microsoft.VCRedist.2015+.x64 (admin prompt)" { Winget-Install "Microsoft.VCRedist.2015+.x64" @() }
-    Add-Check $(if ($DryRun) { "INFO" } elseif ($ok) { "PASS" } else { "WARN" }) "Visual C++ runtime" $(if ($DryRun) { "would be installed (admin)" } else { "if TARS fails to start, install 'Microsoft Visual C++ 2015-2022 Redistributable (x64)'" })
+    Add-Check $(if ($DryRun) { "INFO" } elseif ($ok) { "PASS" } else { "WARN" }) "Visual C++ runtime" $(if ($DryRun) { "would be installed (admin)" } else { "if AIDA fails to start, install 'Microsoft Visual C++ 2015-2022 Redistributable (x64)'" })
 }
 $gpu = $false
 if (-not $Cpu) {
@@ -321,7 +321,7 @@ else {
             & $venvPy -c "from faster_whisper.utils import download_model; print(download_model('$wm'))"
             if ($LASTEXITCODE -ne 0) { throw "could not fetch the Whisper model" }
         }
-        Add-Check $(if ($DryRun) { "INFO" } elseif ($ok) { "PASS" } else { "WARN" }) "Speech model $wm" $(if ($DryRun) { "would be downloaded" } else { "TARS retries on first start" })
+        Add-Check $(if ($DryRun) { "INFO" } elseif ($ok) { "PASS" } else { "WARN" }) "Speech model $wm" $(if ($DryRun) { "would be downloaded" } else { "AIDA retries on first start" })
     } else { Add-Check "INFO" "Speech model $wm" "downloaded on first start (venv not built in dry run)" }
 }
 
@@ -354,11 +354,11 @@ if (-not $NoShortcut) {
         $s.Save()
     }
     $desk = [Environment]::GetFolderPath("Desktop")
-    $menu = Join-Path ([Environment]::GetFolderPath("Programs")) "TARS.lnk"
-    Act "create Desktop and Start Menu shortcuts to start.bat" { New-Shortcut (Join-Path $desk "TARS.lnk") "TARS voice assistant"; New-Shortcut $menu "TARS voice assistant" } | Out-Null
-    $startup = Join-Path ([Environment]::GetFolderPath("Startup")) "TARS.lnk"
-    if ($StartWithWindows -or ((-not (Test-Path $startup)) -and (Ask-YesNo "Start TARS automatically when you sign in to Windows?" $false))) {
-        Act "create a Startup shortcut ($startup)" { New-Shortcut $startup "TARS voice assistant" } | Out-Null
+    $menu = Join-Path ([Environment]::GetFolderPath("Programs")) "AIDA.lnk"
+    Act "create Desktop and Start Menu shortcuts to start.bat" { New-Shortcut (Join-Path $desk "AIDA.lnk") "AIDA voice assistant"; New-Shortcut $menu "AIDA voice assistant" } | Out-Null
+    $startup = Join-Path ([Environment]::GetFolderPath("Startup")) "AIDA.lnk"
+    if ($StartWithWindows -or ((-not (Test-Path $startup)) -and (Ask-YesNo "Start AIDA automatically when you sign in to Windows?" $false))) {
+        Act "create a Startup shortcut ($startup)" { New-Shortcut $startup "AIDA voice assistant" } | Out-Null
     }
     Add-Check "PASS" "Shortcuts" "Desktop + Start Menu"
 }
@@ -373,7 +373,7 @@ function Setup-GitHub {
     }
     if (-not (Have "git")) { Add-Check "INFO" "GitHub copy" "git not installed; skipped"; return }
     if (-not $DryRun -and -not (Test-Online)) { Add-Check "WARN" "GitHub copy" "offline; re-run the installer when connected"; return }
-    Info "Gives you your own private copy of TARS on GitHub, separate from the original, so you can change it freely."
+    Info "Gives you your own private copy of AIDA on GitHub, separate from the original, so you can change it freely."
     if (-not $DryRun -and -not $Yes -and -not (Ask-YesNo "Set up your own GitHub copy now?" $true)) { Add-Check "INFO" "GitHub copy" "skipped by you (re-run any time)"; return }
 
     if (-not (Have "gh")) {
@@ -439,7 +439,7 @@ function Setup-GitHub {
         } else {
             $ok = Act "gh repo create $full --$Visibility --source . --remote origin --push   (an independent copy under your account)" {
                 Push-Location $InstallDir
-                try { & gh repo create $full "--$Visibility" --source . --remote origin --push --description "My TARS voice assistant" } finally { Pop-Location }
+                try { & gh repo create $full "--$Visibility" --source . --remote origin --push --description "My AIDA voice assistant" } finally { Pop-Location }
                 if ($LASTEXITCODE -ne 0) { throw "gh repo create failed" }
             }
             Add-Check $(if ($DryRun) { "INFO" } elseif ($ok) { "PASS" } else { "WARN" }) "Your repo $full ($Visibility)" $(if ($DryRun) { "would be created and pushed" } else { "created; origin set" })
@@ -450,7 +450,7 @@ function Setup-GitHub {
     if ($mine -and -not $DryRun) {
         $priv = ((& gh repo view (Git-Out @("remote", "get-url", "origin")) --json isPrivate --jq .isPrivate 2>$null) -join "").Trim()
         $want = [bool]$SyncMemory
-        if (-not $want -and -not $Yes) { $want = Ask-YesNo "Back up what TARS learns about you (assistant/memory/topics) to your PRIVATE repo? Off by default" $false }
+        if (-not $want -and -not $Yes) { $want = Ask-YesNo "Back up what AIDA learns about you (assistant/memory/topics) to your PRIVATE repo? Off by default" $false }
         if ($want -and $priv -ne "true") { Write-Host "    Your repo is not private, so memory sync stays OFF." -ForegroundColor Yellow; $want = $false }
         if ($want) { & $venvPy (Join-Path $InstallDir "setup_wizard.py") --yes --sync on | Out-Null; Add-Check "PASS" "Memory sync" "ON, to origin only" }
         else { Add-Check "INFO" "Memory sync" "off (default). Enable with sync_memory: true in config.yaml" }
@@ -475,7 +475,7 @@ Write-Host ""
 Write-Host "WHAT TO DO NEXT" -ForegroundColor Green
 $n = 1
 foreach ($x in $script:Next) { Write-Host "  $n. $x"; $n++ }
-Write-Host "  $n. Start TARS with the TARS shortcut on your Desktop (or run start.bat). Press the backtick key ( `` ) to talk, press it again to send."
+Write-Host "  $n. Start AIDA with the AIDA shortcut on your Desktop (or run start.bat). Press the backtick key ( `` ) to talk, press it again to send."
 if ($script:Offline) { Write-Host "  (You were offline for part of this. Re-run the installer when connected; it only does what is missing.)" }
 if ($DryRun) { Write-Host "`nThat was a dry run: nothing was changed." -ForegroundColor Yellow }
 $failed = @($script:Checks | Where-Object { $_.Status -eq "FAIL" }).Count

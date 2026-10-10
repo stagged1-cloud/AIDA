@@ -1,8 +1,8 @@
 @echo off
-title TARS voice
+title AIDA voice
 cd /d "%~dp0"
 if not exist ".venv\Scripts\python.exe" (
-  echo TARS is not installed yet. Run install.ps1 first ^(see README.md^).
+  echo AIDA is not installed yet. Run install.ps1 first ^(see README.md^).
   pause
   exit /b 1
 )

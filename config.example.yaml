@@ -1,8 +1,8 @@
-# TARS voice settings. install.ps1 copies this to config.yaml (which is git-ignored) and the first-run
-# wizard fills in the personal bits. Restart TARS (close the window, run start.bat) after changing config.yaml.
+# AIDA voice settings. install.ps1 copies this to config.yaml (which is git-ignored) and the first-run
+# wizard fills in the personal bits. Restart AIDA (close the window, run start.bat) after changing config.yaml.
 
 # --- you
-user_name: ""               # how TARS refers to you in logs and memory ("" = "You")
+user_name: ""               # how AIDA refers to you in logs and memory ("" = "You")
 language_style: "British English"   # sent to Claude every turn: "British English", "American English", ...
 time_label: ""              # optional text after the time in each message header, e.g. "UK", "Eastern"
 search_url: "https://www.google.com/search?q="   # used by "search for ..."; e.g. https://www.google.co.uk/search?q=
@@ -21,17 +21,17 @@ kokoro_short_speed: 1.2     # speed for short lines of 4 words or fewer
 kokoro_question_rise: 0     # raise (e.g. 2) for more lift on yes/no questions
 voice_prefer: ["Guy", "David", "Natural"]   # Windows voice fallback; first name match wins
 voice_rate: 0               # -10 slow ... 0 normal ... 10 fast
-tars_voice: true            # robot-ish TARS processing on the voice (false = plain voice)
-tars_pitch: 0.94            # lower = deeper and slower (0.88 .. 1.0)
-tars_metal: 0.28            # metallic ring (0 = none, 0.5 = very robotic)
-tars_low: 260               # speaker-grille band, Hz
-tars_high: 4200
+aida_voice: true            # robot-ish AIDA processing on the voice (false = plain voice)
+aida_pitch: 0.94            # lower = deeper and slower (0.88 .. 1.0)
+aida_metal: 0.28            # metallic ring (0 = none, 0.5 = very robotic)
+aida_low: 260               # speaker-grille band, Hz
+aida_high: 4200
 question_rise: 4.0          # semitones a yes/no question lifts at the end with the Windows voice (0 = off)
 
 whisper_model: "small.en"   # GPU speech recognition; "medium.en" is more accurate, slower. English only.
 whisper_cpu_model: "small.en"   # used when there is no usable NVIDIA GPU
 whisper_device: "auto"      # "auto" = try the GPU, fall back to CPU; "cpu" = never try the GPU (install.ps1 sets this if no NVIDIA GPU)
-vocabulary: "Claude, Claude Code, TARS"   # extra words to help recognition (names, jargon). Add yours.
+vocabulary: "Claude, Claude Code, AIDA"   # extra words to help recognition (names, jargon). Add yours.
 
 # --- brain
 projects_dir: ""            # blank = the folder above this one (only used to shorten paths on screen)
@@ -42,7 +42,7 @@ deep_phrases: ["think hard", "think about it properly", "use the big model"]
 mcp_keywords: ["email", "e-mail", "gmail", "inbox", "calendar", "meeting", "diary", "drive", "google doc", "google sheet", "jira", "confluence", "connector"]
 humour: 60                  # percent; change by voice: "humour setting 75"
 honesty: 90                 # percent; change by voice: "honesty setting 80"
-mirror: 30                  # percent; how much TARS talks like you: "mirror setting 70"
+mirror: 30                  # percent; how much AIDA talks like you: "mirror setting 70"
 task_timeout_min: 30
 idle_minutes: 30            # a new conversation starts after this much silence (today's memory carries over)
 ack_after_s: 8              # only says "bear with me" if a job takes longer than this

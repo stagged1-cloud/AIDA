@@ -1,6 +1,6 @@
 # Third-party software and models
 
-TARS itself is MIT-licensed (see `LICENSE`). It does **not** bundle any of the items below. The installer downloads
+AIDA itself is MIT-licensed (see `LICENSE`). It does **not** bundle any of the items below. The installer downloads
 them to your PC from their public sources, and each stays under its own licence. Licences are listed from the
 projects' public pages as best known at the time of writing; check the linked source before redistributing anything.
 
@@ -25,18 +25,16 @@ The installer verifies the Kokoro files by size and SHA-256 before using them.
 | PyYAML | MIT |
 | numpy, scipy | BSD-3-Clause |
 | pywin32 | PSF-2.0 |
-| phonemizer(-fork), espeakng-loader (pulled in by kokoro-onnx; wraps eSpeak NG) | GPL-3.0 family (eSpeak NG is GPL-3.0+). Installed as separate pip dependencies, not bundled or modified by TARS. If you redistribute a bundle that includes them, the GPL applies to that bundle. |
-| nvidia-cublas-cu12, nvidia-cudnn-cu12 (optional, NVIDIA GPUs only) | NVIDIA proprietary licence (CUDA / cuDNN EULA); free to use, not redistributable by TARS |
+| phonemizer(-fork), espeakng-loader (pulled in by kokoro-onnx; wraps eSpeak NG) | GPL-3.0 family (eSpeak NG is GPL-3.0+). Installed as separate pip dependencies, not bundled or modified by AIDA. If you redistribute a bundle that includes them, the GPL applies to that bundle. |
+| nvidia-cublas-cu12, nvidia-cudnn-cu12 (optional, NVIDIA GPUs only) | NVIDIA proprietary licence (CUDA / cuDNN EULA); free to use, not redistributable by AIDA |
 
 ## Programs
 
 | Program | Notes |
 |---|---|
-| Claude Code (`claude`) | Anthropic. Installed with Anthropic's own installer; use is governed by Anthropic's terms and **your own** Claude account or plan. TARS never sees or stores your credentials. |
+| Claude Code (`claude`) | Anthropic. Installed with Anthropic's own installer; use is governed by Anthropic's terms and **your own** Claude account or plan. AIDA never sees or stores your credentials. |
 | Python, GitHub CLI (`gh`), Git, Microsoft Visual C++ Redistributable | Installed from their official sources via `winget`; their own licences apply. |
 
 ## Trademarks
 
-"TARS" is the name of a robot in the film *Interstellar*. This is an unofficial, non-commercial hobby project with no
-affiliation to the film or its rights holders, and it contains no film dialogue or assets. Rename it if you publish
-a fork. "Claude" and "Claude Code" are trademarks of Anthropic, PBC; this project is not affiliated with or endorsed by Anthropic.
+"Claude" and "Claude Code" are trademarks of Anthropic, PBC; this project is not affiliated with or endorsed by Anthropic.

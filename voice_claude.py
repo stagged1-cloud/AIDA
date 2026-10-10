@@ -55,12 +55,12 @@ ESC = chr(27)
 
 
 def show(who, text):
-    """Console layout: you and TARS stand out, working-out lines are dim grey."""
+    """Console layout: you and AIDA stand out, working-out lines are dim grey."""
     t = now()
     if who == USER:
         print(f"\n{ESC}[1;96m  YOU  {ESC}[2;96m{t}{ESC}[0m\n{ESC}[96m  {text}{ESC}[0m", flush=True)
     elif who == "Claude":
-        print(f"\n{ESC}[1;92m  TARS  {ESC}[2;92m{t}{ESC}[0m\n{ESC}[38;5;151m  {text}{ESC}[0m", flush=True)
+        print(f"\n{ESC}[1;92m  AIDA  {ESC}[2;92m{t}{ESC}[0m\n{ESC}[38;5;151m  {text}{ESC}[0m", flush=True)
     else:
         try:
             width = shutil.get_terminal_size((120, 30)).columns - 14
@@ -266,13 +266,13 @@ class Mouth(threading.Thread):
         v.Rate = int(CFG.get("voice_rate", 0))
         self.voice_name = v.Voice.GetDescription()
         self.fx = None
-        if CFG.get("tars_voice", False):
+        if CFG.get("aida_voice", False):
             try:
-                from tars_fx import tars
-                self.fx = tars
-                self.voice_name += " + TARS processing"
+                from aida_fx import aida
+                self.fx = aida
+                self.voice_name += " + AIDA processing"
             except Exception as e:
-                log("setup", f"TARS processing unavailable ({e}), using the plain voice.")
+                log("setup", f"AIDA processing unavailable ({e}), using the plain voice.")
         self._load_kokoro()
         self.ready.set()
         while True:
@@ -292,7 +292,7 @@ class Mouth(threading.Thread):
                 try:
                     self._speak_fx(v, text)
                 except Exception as e:
-                    log("voice", f"TARS voice failed ({e}), falling back.")
+                    log("voice", f"AIDA voice failed ({e}), falling back.")
                     self.fx = None
                 self.busy = False
                 continue
@@ -319,7 +319,7 @@ class Mouth(threading.Thread):
             self.kvoice = CFG.get("kokoro_voice", "am_onyx")
             k.create("Ready.", voice=self.kvoice, speed=1.0, lang=CFG.get("kokoro_lang", "en-us"))      # warm up
             self.kokoro = k
-            self.voice_name = f"Kokoro {self.kvoice}" + (" + TARS processing" if self.fx else "")
+            self.voice_name = f"Kokoro {self.kvoice}" + (" + AIDA processing" if self.fx else "")
             self.kcache = {}
             threading.Thread(target=self._prerender, daemon=True).start()
         except Exception as e:
@@ -339,9 +339,9 @@ class Mouth(threading.Thread):
                 pass
 
     def _kclip(self, chunk):
-        """One finished clip: Kokoro render, optional question lift, TARS filter, dead air trimmed off the front."""
+        """One finished clip: Kokoro render, optional question lift, AIDA filter, dead air trimmed off the front."""
         import numpy as np
-        from tars_fx import wants_rise, rise_end
+        from aida_fx import wants_rise, rise_end
         short = len(chunk.split()) <= 4
         speed = float(CFG.get("kokoro_short_speed", 1.2) if short else CFG.get("kokoro_speed", 1.0))
         a, sr = self.kokoro.create(chunk, voice=self.kvoice, speed=speed, lang=CFG.get("kokoro_lang", "en-us"))
@@ -350,8 +350,8 @@ class Mouth(threading.Thread):
         if semis and wants_rise(re.split(r"(?<=[.!])\s", chunk)[-1]):
             a = rise_end(a, sr, semis=semis)
         if self.fx:
-            a = self.fx(a, sr, pitch=float(CFG.get("tars_pitch", 0.94)), metal=float(CFG.get("tars_metal", 0.28)),
-                        low=float(CFG.get("tars_low", 260)), high=float(CFG.get("tars_high", 4200)))
+            a = self.fx(a, sr, pitch=float(CFG.get("aida_pitch", 0.94)), metal=float(CFG.get("aida_metal", 0.28)),
+                        low=float(CFG.get("aida_low", 260)), high=float(CFG.get("aida_high", 4200)))
         a = np.asarray(a, np.float32)
         loud = np.where(np.abs(a) > 0.02)[0]
         if len(loud):
@@ -362,7 +362,7 @@ class Mouth(threading.Thread):
         """Render a sentence or two ahead and stream them back to back, so the speech runs on without gaps."""
         import numpy as np
         import sounddevice as sd
-        from tars_fx import wants_rise, rise_end
+        from aida_fx import wants_rise, rise_end
         parts = [p.strip() for p in re.findall(r"[^.!?]+[.!?]*", text) if p.strip()] or [text]
         chunks, cur = [parts[0]], ""                   # first sentence alone so it starts talking quickly
         for p in parts[1:]:
@@ -426,7 +426,7 @@ class Mouth(threading.Thread):
             v.AudioOutputStream = None
 
     def _speak_fx(self, v, text):
-        """Render each sentence, run it through the TARS filter, play it; render the next while one plays."""
+        """Render each sentence, run it through the AIDA filter, play it; render the next while one plays."""
         import wave
         import winsound
         import numpy as np
@@ -435,7 +435,7 @@ class Mouth(threading.Thread):
         parts = re.findall(r"[^.!?]+[.!?]*", text) or [text]
         # first sentence alone so it starts talking quickly; the rest in long runs so the rhythm flows.
         # a yes/no question gets its own run so its ending can lift.
-        from tars_fx import wants_rise, rise_end
+        from aida_fx import wants_rise, rise_end
         chunks, cur = [parts[0].strip()], ""
         for part in parts[1:]:
             if wants_rise(part):
@@ -464,8 +464,8 @@ class Mouth(threading.Thread):
                 a = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768
             if wants_rise(chunk.split(".")[-1] if not chunk.endswith("?") else re.split(r"(?<=[.!])\s", chunk)[-1]):
                 a = rise_end(a, rate, semis=float(CFG.get("question_rise", 2.5)))
-            y = self.fx(a, rate, pitch=float(CFG.get("tars_pitch", 0.94)), metal=float(CFG.get("tars_metal", 0.28)),
-                        low=float(CFG.get("tars_low", 260)), high=float(CFG.get("tars_high", 4200)))
+            y = self.fx(a, rate, pitch=float(CFG.get("aida_pitch", 0.94)), metal=float(CFG.get("aida_metal", 0.28)),
+                        low=float(CFG.get("aida_low", 260)), high=float(CFG.get("aida_high", 4200)))
             with wave.open(str(out), "wb") as w:
                 w.setnchannels(1)
                 w.setsampwidth(2)
@@ -831,7 +831,7 @@ def _norm(text):
     t = text.lower().replace("’", "'")
     t = re.sub(r"[^a-z0-9.' /-]", " ", t)
     t = re.sub(r"\s+", " ", t).strip(" .")
-    t = re.sub(r"^(?:(?:ok|okay|right|tars|hey tars|please|can you|could you|would you|will you)\s+)+", "", t)
+    t = re.sub(r"^(?:(?:ok|okay|right|aida|hey aida|please|can you|could you|would you|will you)\s+)+", "", t)
     t = re.sub(r"\s+(?:please|for me|now|thanks|thank you)$", "", t)
     return t
 
@@ -1220,7 +1220,7 @@ class Overlay:
 # ---------------------------------------------------------------- the app
 CONFIRM_RE = re.compile(r"^(yes,? )?(confirmed?|confirm it|go ahead|do it|yes do it|send it|delete it|approved?)\b", re.I)
 ACKS = ["Give me a sec.", "Bear with me.", "This one's taking a minute.", "Working on it."]
-START_RE = re.compile(r"(?:initiate|initialise|initialize|start|wake up|morning)\s+(?:tars|tarz|taz|stars|tars mode)|start of (?:the )?day")
+START_RE = re.compile(r"(?:initiate|initialise|initialize|start|wake up|morning)\s+(?:aida|ida|ayda|aider|eider|aeda|eda|a\.i\.d\.a|aida mode)|start of (?:the )?day")
 END_RE = re.compile(r"(?:initiate\s+)?end of (?:the )?day|shut ?down for the day")
 LEARN_PROMPT = ("Update the user's speech profile in memory/topics/how_you_talk.md (read it first; edit it in place and "
                 "change nothing else). Below are their NEW spoken lines (transcribed) since the last update. Merge what "
@@ -1231,7 +1231,7 @@ LEARN_PROMPT = ("Update the user's speech profile in memory/topics/how_you_talk.
                 "words and names, comma-separated, under '## Vocabulary'. Keep the file under about 120 lines, facts "
                 "not prose, no customer, patient or other sensitive data. Add or update a 'Last learned' line with "
                 "today's date and time. Reply with just: ok\n\nNEW LINES:\n{lines}")
-START_PROMPT = ("Start of day (the user said 'initiate TARS'). Read memory/topics/week_summary.md and memory/topics/todo.md. "
+START_PROMPT = ("Start of day (the user said 'initiate AIDA'). Read memory/topics/week_summary.md and memory/topics/todo.md. "
                 "Brief them out loud in under 40 seconds: the few things from the past week worth remembering, "
                 "then today's to-dos, most important first. If both are empty, say so in one line and ask what's on today.")
 END_PROMPT = ("End of day (the user said 'initiate end of day'). Go through today's full transcript in memory/days/{day}.md "
@@ -1339,7 +1339,7 @@ class App:
             run_instant(cmd)
             chime()
             log("instant", desc)
-            self.memory.add("TARS", f"(instant) {desc}")
+            self.memory.add("AIDA", f"(instant) {desc}")
             self.unseen.append(f"{now()} {USER} said: \"{text}\" -> the program did it instantly, without you: {desc}")
             return
         if self.working:
@@ -1442,7 +1442,7 @@ class App:
         elif kind == "text":
             self.feed.append((clip(info, 400), "say"))
             log("note", clip(info, 300))
-            self.memory.add("TARS", f"(after the reply) {info}")
+            self.memory.add("AIDA", f"(after the reply) {info}")
             busy = any(a["status"] == "Working" for a in self.agents.values())
             if self.working or busy or re.search(r"\[quiet\]", info, re.I):
                 return
@@ -1550,7 +1550,7 @@ class App:
             if re.search(r"\bconfirm", reply, re.I):
                 self.awaiting_confirm = True
             log("Claude", reply or "[done]")
-            self.memory.add("TARS", reply or "(done, no reply needed)")
+            self.memory.add("AIDA", reply or "(done, no reply needed)")
             if quiet or not reply:
                 chime()
                 return

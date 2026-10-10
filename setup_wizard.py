@@ -111,8 +111,8 @@ def main():
     if args.yes:
         return 0
 
-    print("\n=== TARS first-run setup (press Enter to accept the [default]) ===")
-    name = ask("What should TARS call you", args.name or "")
+    print("\n=== AIDA first-run setup (press Enter to accept the [default]) ===")
+    name = ask("What should AIDA call you", args.name or "")
     if name:
         set_key("user_name", name)
 
@@ -144,9 +144,9 @@ def main():
     if ask("  Test it now (y/n)", "y").lower().startswith("y"):
         mic_test()
 
-    extra = ask("\nAny names or jargon TARS often mishears? Comma-separated (optional)", "")
+    extra = ask("\nAny names or jargon AIDA often mishears? Comma-separated (optional)", "")
     if extra:
-        set_key("vocabulary", "Claude, Claude Code, TARS, " + extra)
+        set_key("vocabulary", "Claude, Claude Code, AIDA, " + extra)
 
     print("\nSaved to config.yaml. Edit it any time; every setting is documented in the file and README.md.")
     return 0
