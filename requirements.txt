@@ -1,0 +1,8 @@
+faster-whisper
+sounddevice
+numpy
+scipy
+keyboard
+pywin32
+pyyaml
+kokoro-onnx

@@ -1,0 +1,3 @@
+# Optional: NVIDIA GPU speech recognition (CUDA 12). Installed by install.ps1 only when an NVIDIA GPU is detected.
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*

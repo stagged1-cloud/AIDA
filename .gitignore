@@ -1,0 +1,34 @@
+# environment and caches
+.venv/
+__pycache__/
+*.pyc
+
+# your settings (copy of config.example.yaml)
+config.yaml
+
+# runtime state, logs, generated audio
+state.json
+setup.log
+install.log
+logs/
+tmp/
+*.wav
+
+# downloaded models (install.ps1 fetches these from their public sources)
+models/
+
+# personal memory: never committed or pushed unless you opt in (sync_memory: true force-adds topics/ only to YOUR origin)
+assistant/memory/days/
+assistant/memory/topics/
+assistant/memory/today.md
+assistant/memory/recent.md
+assistant/memory/memory.db
+assistant/memory/screenshots/
+
+# written by the program on every start
+assistant/.confirm_token
+assistant/.claude/settings.json
+
+# hand-made backups
+*.backup*
+backups/

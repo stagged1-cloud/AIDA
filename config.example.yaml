@@ -1,0 +1,89 @@
+# TARS voice settings. install.ps1 copies this to config.yaml (which is git-ignored) and the first-run
+# wizard fills in the personal bits. Restart TARS (close the window, run start.bat) after changing config.yaml.
+
+# --- you
+user_name: ""               # how TARS refers to you in logs and memory ("" = "You")
+language_style: "British English"   # sent to Claude every turn: "British English", "American English", ...
+time_label: ""              # optional text after the time in each message header, e.g. "UK", "Eastern"
+search_url: "https://www.google.com/search?q="   # used by "search for ..."; e.g. https://www.google.co.uk/search?q=
+
+# --- keys
+hotkey: "`"                 # press to talk, press again to send
+cancel_hotkey: "ctrl+`"     # stops the current job
+
+# --- ears and mouth
+microphone: ""              # blank = the Windows default mic (Sound settings > Input); or part of a name, e.g. "USB"
+tts_engine: "kokoro"        # "kokoro" = neural voice on this PC (models downloaded by install.ps1); "sapi" = Windows voice
+kokoro_voice: "am_onyx"     # am_onyx, am_adam, am_fenrir, am_eric, am_michael (US male); bm_george, bm_lewis (UK male); af_*/bf_* female
+kokoro_lang: "en-us"        # "en-us" for am_/af_ voices, "en-gb" for bm_/bf_ voices
+kokoro_speed: 1.1           # 0.8 slower ... 1.2 faster
+kokoro_short_speed: 1.2     # speed for short lines of 4 words or fewer
+kokoro_question_rise: 0     # raise (e.g. 2) for more lift on yes/no questions
+voice_prefer: ["Guy", "David", "Natural"]   # Windows voice fallback; first name match wins
+voice_rate: 0               # -10 slow ... 0 normal ... 10 fast
+tars_voice: true            # robot-ish TARS processing on the voice (false = plain voice)
+tars_pitch: 0.94            # lower = deeper and slower (0.88 .. 1.0)
+tars_metal: 0.28            # metallic ring (0 = none, 0.5 = very robotic)
+tars_low: 260               # speaker-grille band, Hz
+tars_high: 4200
+question_rise: 4.0          # semitones a yes/no question lifts at the end with the Windows voice (0 = off)
+
+whisper_model: "small.en"   # GPU speech recognition; "medium.en" is more accurate, slower. English only.
+whisper_cpu_model: "small.en"   # used when there is no usable NVIDIA GPU
+whisper_device: "auto"      # "auto" = try the GPU, fall back to CPU; "cpu" = never try the GPU (install.ps1 sets this if no NVIDIA GPU)
+vocabulary: "Claude, Claude Code, TARS"   # extra words to help recognition (names, jargon). Add yours.
+
+# --- brain
+projects_dir: ""            # blank = the folder above this one (only used to shorten paths on screen)
+claude_path: ""             # blank = find `claude` on PATH (install.ps1 installs Claude Code)
+model: "sonnet"             # fast everyday model ("haiku" = fastest, "" = Claude Code default)
+model_deep: ""              # used when you say "think hard" ("" = Claude Code default, the heavyweight)
+deep_phrases: ["think hard", "think about it properly", "use the big model"]
+mcp_keywords: ["email", "e-mail", "gmail", "inbox", "calendar", "meeting", "diary", "drive", "google doc", "google sheet", "jira", "confluence", "connector"]
+humour: 60                  # percent; change by voice: "humour setting 75"
+honesty: 90                 # percent; change by voice: "honesty setting 80"
+mirror: 30                  # percent; how much TARS talks like you: "mirror setting 70"
+task_timeout_min: 30
+idle_minutes: 30            # a new conversation starts after this much silence (today's memory carries over)
+ack_after_s: 8              # only says "bear with me" if a job takes longer than this
+restart_reminder_min: 0     # >0 = spoken reminder to restart every N minutes (clears Claude's context)
+
+# --- memory
+learn_every_min: 10         # how often your speech profile is updated from new lines (0 = never)
+sync_memory: false          # OPT-IN. true = push assistant/memory/topics to YOUR OWN GitHub repo (origin). Never to upstream.
+
+# --- quiet laptop mic helpers
+mic_normalise: true         # lift quiet recordings to a healthy level before recognition
+mic_max_gain: 20            # never boost more than this
+mic_gain: 1.0               # extra fixed boost (2.0 = double) if it is still too quiet
+vad_threshold: 0.3          # lower = keeps quieter speech (default 0.5)
+vad_pad_ms: 400             # keeps this much audio around speech so word starts and ends are not clipped
+voice_threshold: 0.015      # mic level that counts as you talking (red border)
+overlay: true               # small always-on-top status box
+overlay_position: "top-right"   # top-right, top-left, bottom-right, bottom-left
+
+# --- instant commands: done straight away, no Claude, just a chime
+apps:
+  chrome: 'Start-Process chrome'
+  browser: 'Start-Process chrome'
+  edge: 'Start-Process msedge'
+  vs code: 'code'
+  notepad: 'Start-Process notepad'
+  file explorer: 'Start-Process explorer'
+  explorer: 'Start-Process explorer'
+  projects: 'Start-Process explorer "$env:USERPROFILE\Documents\Projects"'
+  downloads: 'Start-Process explorer "$env:USERPROFILE\Downloads"'
+  calculator: 'Start-Process calc'
+  task manager: 'Start-Process taskmgr'
+  settings: 'Start-Process ms-settings:'
+  sound settings: 'Start-Process ms-settings:sound'
+  terminal: 'Start-Process wt'
+  spotify: 'Start-Process spotify:'
+sites:
+  google: 'https://www.google.com'
+  bbc news: 'https://www.bbc.co.uk/news'
+  bbc: 'https://www.bbc.co.uk'
+  youtube: 'https://www.youtube.com'
+  gmail: 'https://mail.google.com'
+  github: 'https://github.com'
+  claude: 'https://claude.ai'
