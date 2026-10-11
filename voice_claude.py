@@ -22,10 +22,28 @@ import threading
 import collections
 import subprocess
 
+# Windowless start (pythonw.exe, see start.bat): no console, so stdout/stderr are None. Redirect them to
+# logs\console.txt before anything can print, and turn any fatal error into a message box instead of silence.
+try:
+    import windowless
+    WINDOWLESS = windowless.setup(pathlib.Path(__file__).resolve().parent / "logs")
+    windowless.install_excepthook(pathlib.Path(__file__).resolve().parent / "logs", WINDOWLESS)
+except Exception:
+    windowless = None
+    WINDOWLESS = sys.stdout is None
+
 import yaml
 
+try:
+    import chat_window                 # text window: no Tk at import time, safe if it ever fails
+except Exception:
+    chat_window = None
+
 HERE = pathlib.Path(__file__).resolve().parent
-CFG = yaml.safe_load((HERE / "config.yaml").read_text(encoding="utf-8")) or {}
+_CFG_FILE = HERE / "config.yaml"
+if not _CFG_FILE.exists():                 # not set up yet (or a test run on a bare checkout): use the shipped defaults
+    _CFG_FILE = HERE / "config.example.yaml"
+CFG = yaml.safe_load(_CFG_FILE.read_text(encoding="utf-8-sig")) or {}
 HOME = HERE / "assistant"                 # Claude Code works from here (CLAUDE.md, hooks)
 STATE_FILE = HERE / "state.json"
 TOKEN_FILE = HOME / ".confirm_token"      # read by assistant/guard.py
@@ -50,13 +68,26 @@ def _enable_ansi():
         pass
 
 
-_enable_ansi()
+if not WINDOWLESS:
+    _enable_ansi()                                 # console-only; there is no console under pythonw
 ESC = chr(27)
 
 
 def show(who, text):
     """Console layout: you and AIDA stand out, working-out lines are dim grey."""
     t = now()
+    if chat_window:
+        cw_who = "You" + who[len(USER):] if who.startswith(USER) else who      # chat window keys on "You"
+        chat_window.feed(t, cw_who, text)          # same lines, mirrored into the chat window
+    if WINDOWLESS:
+        return                                     # no console; log() still writes logs\<day>.txt
+    try:
+        _console_line(who, text, t)
+    except Exception:
+        pass                                       # a dead or closed console must never take the app down
+
+
+def _console_line(who, text, t):
     if who == USER:
         print(f"\n{ESC}[1;96m  YOU  {ESC}[2;96m{t}{ESC}[0m\n{ESC}[96m  {text}{ESC}[0m", flush=True)
     elif who == "Claude":
@@ -97,17 +128,28 @@ def save_state(state):
         pass
 
 
+import sounds
+import confirm_state
+import usage
+import timing_log
+import fast_turns                    # fast_simple_turns: haiku for simple turns (off unless enabled)
+TIMING_FILE = LOG_DIR / "timing.jsonl"
+# beeps and the chime are small generated WAVs played through winsound.PlaySound (the same route as the AIDA voice),
+# because winsound.Beep is silent on many Windows 11 audio setups. See sounds.py for the rules.
+SOUNDS = sounds.Sounds(HERE / "state" / "sounds", enabled=bool(CFG.get("sounds", True)),
+                       log=lambda who, text: log(who, text))
+
+
+# Mute silences this process's audio session (speaker only): speech, beeps and the chime all go quiet together, while
+# playback carries on in real time. Forced un-muted at start-up and at exit. See audio_mute.py.
+import audio_mute
+MUTER = audio_mute.SessionMuter(log=lambda who, text: log(who, text))
+audio_mute.install_exit_restore(MUTER)
+
+
 def beep(kind):
-    try:
-        import winsound
-        if kind == "start":
-            winsound.Beep(880, 90)
-        elif kind == "stop":
-            winsound.Beep(600, 90)
-        elif kind == "error":
-            winsound.Beep(300, 200)
-    except Exception:
-        pass
+    SOUNDS.play(kind)
+    MUTER.reapply()                 # a beep opens a fresh session: make sure it obeys Mute
 
 
 # ---------------------------------------------------------------- ears (mic + speech-to-text)
@@ -139,7 +181,18 @@ def prep_audio(np, audio):
     return np.clip(audio, -1.0, 1.0).astype(np.float32)
 
 
+import echo_guard
+import speech_hold
+import app_status
+import hotkeys
+import memory_core
+import wake_word                     # open mic "Hey AIDA" (off unless wake_enabled: true)
+SPOKEN = echo_guard.SpokenLog(window_s=float(CFG.get("echo_window_s", 90)), min_block=int(CFG.get("echo_min_words", 4)))
+
+
 class Ears:
+    gate = None                                   # echo_guard.EchoGate, set by App
+
     def __init__(self):
         import numpy as np
         import sounddevice as sd
@@ -184,6 +237,11 @@ class Ears:
         np = self.np
 
         def on_audio(data, n, t, s):
+            gate = getattr(self, "gate", None)
+            if gate is not None and gate.blocked():       # AIDA is talking: keep the timing, blank the sound
+                self.frames.append(np.zeros_like(data))
+                self.level = 0.0
+                return
             self.frames.append(data.copy())
             self.level = float(np.sqrt(np.mean(np.square(data))))
 
@@ -216,16 +274,44 @@ class Ears:
         return " ".join(s.text.strip() for s in segments).strip()
 
 
+def log_slow_stt(stt_s, audio_s):
+    """Background: speech recognition was slow; log GPU load and the top GPU-heavy suspects so the cause is
+    provable (11 Oct: a game held the GPU at 100% and Whisper on CUDA took 4-25 s)."""
+    gpu = "?"
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu,memory.used",
+                            "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=5,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        u, m = [x.strip() for x in r.stdout.strip().splitlines()[0].split(",")[:2]]
+        gpu = f"GPU {u}% busy, {m} MB used"
+    except Exception as e:
+        gpu = f"GPU load unknown ({e.__class__.__name__})"
+    log("timing", f"slow speech recognition: {stt_s:.1f} s for {audio_s:.1f} s of audio; {gpu}. "
+                  f"A game holding the GPU makes this slow; cap its frame rate.")
+
+
 # ---------------------------------------------------------------- mouth (Windows SAPI voice)
+def is_marker(text):
+    """True for a bare [quiet] / [done] marker, however wrapped or punctuated ("**[quiet]**", "[Quiet].")."""
+    return bool(re.fullmatch(r"[\W_]*(?:quiet|done)[\W_]*", text or "", re.I))
+
+
 class Mouth(threading.Thread):
     def __init__(self):
         super().__init__(daemon=True)
         self.q = queue.Queue()
         self.stop_evt = threading.Event()
         self.busy = False
+        self.level = 0.0                       # live output amplitude (RMS), read by the floating face
+        self.level_t = 0.0                     # time.time() of the last update; stale = no live audio meter
+        self.text, self.text_t = "", 0.0       # line currently being spoken, read by the 3D face (emotion cues)
         self.voice_name = "?"
-        self.kokoro = None                     # neural voice (tts_engine: kokoro); None = Windows SAPI voice
+        self.muted = False                     # global override (Mute switch): speaker silent, speech carries on, never saved
+        self.muted_since, self.backlog_logged = 0.0, False
+        self.kokoro = None                   # neural voice (tts_engine: kokoro); None = Windows SAPI voice
         self.ready = threading.Event()
+        self.cur_timer, self._tmarks = None, {}      # latency timing for the reply being spoken (timing_log.py)
+        self.hold = None                       # speech_hold.SpeechHold, set by App: parks replies while the user talks
         self.start()
         self.ready.wait(15)
 
@@ -233,10 +319,41 @@ class Mouth(threading.Thread):
     def speaking(self):
         return self.busy or not self.q.empty()
 
-    def say(self, text):
+    def _tmark(self, name):
+        try:
+            if self.cur_timer:
+                self.cur_timer.mark(name)
+        except Exception:
+            pass
+
+    def _tend(self):
+        """Reply audio finished (or was stopped): close the turn's timing line."""
+        try:
+            t, self.cur_timer = self.cur_timer, None
+            if t:
+                t.mark("audio_end")
+                t.write(TIMING_FILE)
+        except Exception:
+            pass
+
+    def say(self, text, timer=None):
         text = (text or "").strip()
-        if text:
-            self.q.put(text)
+        if timer and text:
+            self._tmarks[text] = timer
+        if text and not is_marker(text):          # [quiet] / [done] are never spoken, on any path
+            try:
+                import echo_guard
+                SPOKEN.add(text)                  # remembered so it can be filtered out if the mic hears it
+            except Exception:
+                pass
+            if self.hold is not None:
+                self.hold.offer(text)             # held (in order) while the user is mid-speech, else straight to the queue
+            else:
+                self.q.put(text)
+            if (self.muted and not self.backlog_logged and time.time() - self.muted_since > audio_mute.BACKLOG_S
+                    and self.q.qsize() >= 3):
+                self.backlog_logged = True        # one line only: replies are piling up silently
+                log("system", "Still muted: replies are queuing and playing silently. Unmute to hear where I've got to.")
 
     def stop(self):
         while not self.q.empty():
@@ -245,6 +362,15 @@ class Mouth(threading.Thread):
             except queue.Empty:
                 break
         self.stop_evt.set()
+
+    def set_muted(self, flag):
+        """Speaker-only mute. Speech, queue, head and echo guard carry on in real time; only the output goes silent.
+        Unmute makes it audible again from wherever the speech has got to. 'stop' is separate and really stops."""
+        flag = bool(flag)
+        if flag and not self.muted:
+            self.muted_since, self.backlog_logged = time.time(), False
+        self.muted = flag
+        MUTER.set(flag)
 
     def run(self):
         import pythoncom
@@ -277,6 +403,8 @@ class Mouth(threading.Thread):
         self.ready.set()
         while True:
             text = self.q.get()
+            self.text, self.text_t = text, time.time()
+            self.cur_timer = self._tmarks.pop(text, None)
             self.stop_evt.clear()
             self.busy = True
             if self.kokoro:
@@ -287,6 +415,7 @@ class Mouth(threading.Thread):
                     self.kokoro = None
                 else:
                     self.busy = False
+                    self._tend()
                     continue
             if self.fx:
                 try:
@@ -295,8 +424,11 @@ class Mouth(threading.Thread):
                     log("voice", f"AIDA voice failed ({e}), falling back.")
                     self.fx = None
                 self.busy = False
+                self._tend()
                 continue
             try:
+                self._tmark("tts_first_audio")
+                MUTER.reapply()
                 v.Speak(text, 1)                      # 1 = async
                 while not v.WaitUntilDone(100):
                     if self.stop_evt.is_set():
@@ -306,6 +438,7 @@ class Mouth(threading.Thread):
             except Exception as e:
                 log("voice", f"Speech failed: {e}")
             self.busy = False
+            self._tend()
 
 
     def _load_kokoro(self):
@@ -385,25 +518,35 @@ class Mouth(threading.Thread):
                     try:
                         nxt = buf.get_nowait()
                     except queue.Empty:
+                        self.level, self.level_t = 0.0, time.time()
                         return
                     if nxt is None:
                         finished.set()
+                        self.level, self.level_t = 0.0, time.time()
                         return
                     left[0] = nxt
                 n = min(frames - filled, len(left[0]))
                 out[filled:filled + n, 0] = left[0][:n]
                 left[0] = left[0][n:]
                 filled += n
+            try:                                        # amplitude tap for the face; must never disturb playback
+                self.level = float(np.sqrt(np.mean(np.square(out[:filled, 0])))) if filled else 0.0
+                self.level_t = time.time()
+            except Exception:
+                pass
 
         cached = getattr(self, "kcache", {}).get(text.strip())
         with sd.OutputStream(samplerate=rate, channels=1, dtype="float32", callback=feed):
+            MUTER.reapply(wait=True)                     # the stream's session now exists: match Mute before any sound
             if cached is not None:
                 buf.put(cached)                          # stock phrase: already rendered, plays instantly
                 chunks = []
             for chunk in chunks:
                 if self.stop_evt.is_set():
                     break
-                buf.put(self._kclip(chunk))
+                clip = self._kclip(chunk)
+                buf.put(clip)
+                self._tmark("tts_first_audio")           # first clip queued to the open stream (first-wins)
             buf.put(None)
             while not finished.is_set():
                 if self.stop_evt.wait(0.05):
@@ -477,6 +620,8 @@ class Mouth(threading.Thread):
             if self.stop_evt.is_set():
                 break
             winsound.PlaySound(str(out), winsound.SND_FILENAME | winsound.SND_ASYNC)
+            MUTER.reapply()                          # new clip, possibly a new session: match Mute
+            self._tmark("tts_first_audio")
             play_until = time.time() + len(y) / rate
         while time.time() < play_until:
             if self.stop_evt.wait(0.05):
@@ -509,12 +654,20 @@ class Brain:
         self.events = None
         self.oneoff = None
         self.cancelled = False
+        self.usage = usage.UsageTracker(CFG.get("usage_window_tokens") or None,
+                                    plan_path=str(HERE / "state" / "plan_usage.json"))    # context-fill bar (read-only)
+        try:
+            if state.get("session"):
+                self.usage.load_transcript(state["session"])     # after a restart: seed from the transcript
+        except Exception:
+            pass
         self.claude = CFG.get("claude_path") or shutil.which("claude") or str(pathlib.Path.home() / ".local/bin/claude.exe")
 
     # -- lifecycle
     def _kill(self, p):
         if p and p.poll() is None:
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))    # no console flash when windowless
             return True
         return False
 
@@ -527,6 +680,7 @@ class Brain:
         self.stop()
         for k in ("session", "session_at", "session_day"):
             self.state.pop(k, None)
+        self.usage.reset()
         save_state(self.state)
 
     def cancel(self):
@@ -565,10 +719,11 @@ class Brain:
         threading.Thread(target=lambda: proc.err_lines.extend(proc.stderr), daemon=True).start()
         return proc, q
 
-    def _base(self, model, mcp):
+    def _base(self, model, mcp, deep=False):
         cmd = [self.claude, "-p", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"]
         if model:
             cmd += ["--model", model]
+        cmd += timing_log.effort_args(CFG.get("effort", timing_log.EFFORT_DEFAULT), deep)   # config: effort
         if not mcp:
             cmd += ["--strict-mcp-config"]          # skip loading connectors: saves seconds
         return cmd
@@ -584,10 +739,38 @@ class Brain:
                 on_event("mode", "new conversation (today's memory loaded)")
                 for k in ("session", "session_at", "session_day"):
                     self.state.pop(k, None)
+                self.usage.reset()
             self.proc, self.events = self._spawn(cmd, subprocess.PIPE)
+            self.cur_model = CFG.get("model", "sonnet")
+
+    def _switch_model(self, want, on_event):
+        """fast_simple_turns: switch the live session's model between turns (stream-json set_model).
+        Never mid-turn (called before the message is sent). On failure or timeout: stay put and log it;
+        if we were trying to get back to the main model, restart the session (resumed) on the main model."""
+        have = getattr(self, "cur_model", CFG.get("model", "sonnet"))
+        if not want or want == have:
+            return
+        self._ctl_n = getattr(self, "_ctl_n", 0) + 1
+        rid = f"model{self._ctl_n}"
+        proc = self.proc
+
+        def write(line):
+            proc.stdin.write(line)
+            proc.stdin.flush()
+
+        ok = fast_turns.run_switch(write, self.events, want, rid, float(CFG.get("fast_switch_timeout_s", 5)),
+                                   lambda ev: self._route(ev, on_event))   # late helper events pass on as usual
+        if ok:
+            self.cur_model = want
+            log("system", f"Model switched to {want}")
+            return
+        log("system", f"Model switch to {want} failed or timed out; staying on {have}")
+        if want == CFG.get("model", "sonnet"):
+            self.stop()                                # complex turn must not run on the fast model
+            self._ensure(on_event)
 
     # -- one request
-    def ask(self, text, on_event=lambda kind, info: None, mode="normal"):
+    def ask(self, text, on_event=lambda kind, info: None, mode="normal", classify_text=None):
         humour = self.state.get("humour", CFG.get("humour", 60))
         honesty = self.state.get("honesty", CFG.get("honesty", 90))
         mirror = self.state.get("mirror", CFG.get("mirror", 40))
@@ -600,10 +783,19 @@ class Brain:
             return self._oneoff(msg, on_event, mode)
         for attempt in (1, 2):
             self._ensure(on_event)
+            if CFG.get("fast_simple_turns", False):
+                main = CFG.get("model", "sonnet")
+                want = fast_turns.target_model(classify_text if classify_text is not None else text, main,
+                                               CFG.get("fast_model", fast_turns.FAST_MODEL_DEFAULT), True, mode)
+                self._switch_model(want, on_event)
+                if getattr(self, "timer", None):
+                    self.timer.model = str(getattr(self, "cur_model", main))[:40]   # which model served it
             proc = self.proc
             try:
                 proc.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": msg}}) + "\n")
                 proc.stdin.flush()
+                if getattr(self, "timer", None):
+                    self.timer.mark("sent")
             except (OSError, ValueError):
                 self.stop()
                 continue
@@ -622,10 +814,12 @@ class Brain:
         on_event("mode", f"{model or 'default model'}{' (thinking hard)' if deep else ''}"
                          f"{', with connectors' if mcp else ''}")
         self.stop()                                  # the session moves to this run, then back
-        cmd = self._base(model, mcp)
+        cmd = self._base(model, mcp, deep)
         cmd.insert(2, msg)
         if self.state.get("session") and self._fresh_session_ok():
             cmd += ["--resume", self.state["session"]]
+        if getattr(self, "timer", None):
+            self.timer.mark("sent")
         self.oneoff, q = self._spawn(cmd, subprocess.DEVNULL)
         try:
             reply, err, _ = self._collect(q, self.oneoff, on_event)
@@ -671,6 +865,11 @@ class Brain:
 
     def _route(self, ev, on_event):
         """Pass one stream event on as status updates. Returns the event type."""
+        tracker = getattr(self, "usage", None)
+        if tracker is not None:
+            tracker.feed(ev)                           # context-fill numbers only; never raises
+        if getattr(self, "timer", None):
+            self.timer.event(ev)                       # latency timing; numbers only, never raises
         if ev.get("session_id"):
             self.state["session"] = ev["session_id"]
         kind = ev.get("type")
@@ -709,7 +908,7 @@ class Brain:
                     if isinstance(c, dict) and c.get("type") == "tool_result":
                         body = json.dumps(c.get("content", ""))
                         if "BLOCKED until the user confirms" in body:
-                            on_event("blocked", "")
+                            on_event("blocked", confirm_state.describe_block(body))
                         if "Async agent launched" not in body:     # a background helper isn't done yet
                             on_event("agent_end", (c.get("tool_use_id"), bool(c.get("is_error"))))
         return kind
@@ -726,6 +925,7 @@ TOPICS = {
     "decisions.md": "# Decisions\n\n",
     "people.md": "# People\n\n",
     "history.md": "# History\n\n",
+    "core_rules.md": "# Standing rules (short, capped; full dated log in decisions.md)\n\n",
     "how_you_talk.md": ("# How you talk\n"
                         "Learned from your own words in the daily logs. Updated automatically while you use it "
                         "(see learn_every_min in config.yaml) and at end of day. Starts empty.\n\n"
@@ -757,6 +957,10 @@ class Memory:
             if not f.exists():
                 tpl = MEM / "templates" / name
                 f.write_text(tpl.read_text(encoding="utf-8") if tpl.exists() else head, encoding="utf-8")
+        full = MEM / "topics" / "full" / "how_you_talk.md"       # full profile archive (learner writes here)
+        if not full.exists():
+            full.parent.mkdir(exist_ok=True)
+            full.write_text((MEM / "topics" / "how_you_talk.md").read_text(encoding="utf-8"), encoding="utf-8")
         self.lock = threading.Lock()
         self.db = sqlite3.connect(str(MEM / "memory.db"), check_same_thread=False)
         self.db.execute("CREATE TABLE IF NOT EXISTS turns (id INTEGER PRIMARY KEY, day TEXT, ts TEXT, who TEXT, text TEXT)")
@@ -784,9 +988,9 @@ class Memory:
         # start-up memory loads this small file, not the whole of today.md (keeps context rot down)
         try:
             lines = (MEM / "today.md").read_text(encoding="utf-8").splitlines()
-            tail = lines[-int(CFG.get("recent_lines", 40)):]
+            tail = lines[-int(CFG.get("recent_lines", 12)):]      # small: loaded every turn (small always-loaded core)
             body = "\n".join(tail)
-            cap = int(CFG.get("recent_chars", 9000))
+            cap = int(CFG.get("recent_chars", 2500))
             if len(body) > cap:
                 body = body[-cap:]
             (MEM / "recent.md").write_text(
@@ -878,12 +1082,7 @@ def run_instant(cmd):
 
 
 def chime():
-    try:
-        import winsound
-        winsound.Beep(988, 60)
-        winsound.Beep(1319, 80)
-    except Exception:
-        pass
+    SOUNDS.play("chime")
 
 
 def short_path(p):
@@ -1068,7 +1267,12 @@ class Overlay:
         size = app.state.get("overlay_size") or [int(360 * s), int(110 * s)]
         pos = app.state.get("overlay_pos") or self._dock(size)
         self.main = Pane(r, s, size, pos, on_moved=self._moved, on_resized=self._resized, on_double=self._reset)
-        r.deiconify()
+        # single_window: the status box and helper boxes live inside the chat window (chat_window.py); the root
+        # stays hidden. App calls go_single() once that window exists, or go_legacy() if it could not be built.
+        self.single = False
+        self.want_single = bool(chat_window and CFG.get("chat_window", True) and CFG.get("single_window", True))
+        if not self.want_single:
+            r.deiconify()
         self.main.no_focus()
         # one small numbered square per helper in the top bar: click to show / hide its box
         self.icons = tk.Frame(self.main.top, bg=Pane.BG)
@@ -1077,7 +1281,157 @@ class Overlay:
         self.panes = {}                  # agent id -> Pane
         self.n, self.blink = 0, False
         signal.signal(signal.SIGINT, lambda *a: r.after(0, r.destroy))
+        self.face = None
+        # head on/off switch (head_toggle.py): button in the top bar, voice "head on/off"; last choice is remembered
+        import head_toggle
+        self.head_btn = tk.Label(self.main.top, text="", font=("Segoe UI", 8, "bold"), bg=Pane.BG, cursor="hand2",
+                                 padx=int(4 * s))
+        self.head_btn.pack(side="right", padx=(0, int(6 * s)))
+        self.head_btn.bind("<ButtonPress-1>", lambda e: "break")
+        self.head_btn.bind("<ButtonRelease-1>", lambda e: (self.head.toggle_later(), "break")[1])
+        # CHAT button: brings the text window back after it was closed (X only hides it)
+        if chat_window and CFG.get("chat_window", True):
+            self.chat_btn = tk.Label(self.main.top, text="CHAT", font=("Segoe UI", 8, "bold"), bg=Pane.BG,
+                                     fg="#58A6FF", cursor="hand2", padx=int(4 * s))
+            self.chat_btn.pack(side="right", padx=(0, int(2 * s)))
+            self.chat_btn.bind("<ButtonPress-1>", lambda e: "break")
+            self.chat_btn.bind("<ButtonRelease-1>", lambda e: (self._show_chat(), "break")[1])
+        self.head = head_toggle.HeadController(self._open_face, self._close_face, app.state, save_state, log=log,
+                                               schedule=lambda fn: r.after(0, fn), on_change=self._head_changed)
+        # docked head needs the chat window to exist first: go_single()/go_legacy() start it in that case
+        self._head_started = False
+        self._dock_failed = False
+        if not (self.want_single and CFG.get("head_docked", True)):
+            self._start_head()
         self.tick()
+
+    def _start_head(self):
+        if not self._head_started:
+            self._head_started = True
+            import head_toggle
+            self.head.start(head_toggle.initial(self.app.state, CFG))
+
+    def _show_chat(self):
+        chat = getattr(self.app, "chat", None)
+        if chat:
+            chat.show()
+
+    def _open_face(self):
+        self.face = None
+        self._make_face()
+        if self.face is None:
+            raise RuntimeError("no face was created")
+        return self.face
+
+    def _close_face(self, f):
+        """Stop the render thread (3D) or the Tk loop (classic) and destroy the window. Speech and mic untouched."""
+        self.face = None
+        try:
+            if hasattr(f, "stop") and hasattr(f, "thread"):
+                f.stop()
+                f.thread.join(3.0)
+                f._teardown()
+            else:
+                f.dead = True
+                f.win.destroy()
+        except Exception as e:
+            log("face", f"head shutdown problem: {e}")
+
+    def _head_changed(self, on):
+        try:
+            self.head_btn.config(text="● HEAD ON" if on else "○ HEAD OFF", fg="#30A46C" if on else Pane.DIM)
+        except Exception:
+            pass
+        chat = getattr(self.app, "chat", None)
+        if chat and getattr(chat, "single", False):
+            try:
+                chat.head_changed(on)
+            except Exception:
+                pass
+
+    def go_single(self):
+        """The chat window now carries the status strip and helper panel: drop the floating boxes."""
+        self.single = True
+        self.root.withdraw()
+        for aid in list(self.panes):
+            self.panes.pop(aid).destroy()
+        self._start_head()
+
+    def go_legacy(self):
+        """Chat window unavailable: show the old floating status box exactly as before."""
+        self.single = False
+        self.want_single = False
+        self.root.deiconify()
+        self.main.no_focus()
+        self._start_head()
+
+    def _make_face(self):
+        """Floating animated AIDA face: 3D head (face3d.py) or classic (face.py). Read-only view of app state."""
+        import math
+        app = self.app
+
+        def state():
+            if app.recording:
+                return "listening"
+            if app.mouth.speaking:
+                return "speaking"
+            if app.transcribing or app.working:
+                return "thinking"
+            return "idle"
+
+        def level():
+            m = app.mouth
+            if time.time() - m.level_t < 0.25:
+                return m.level                                   # live Kokoro output amplitude
+            # no live meter (Windows-voice path): a speech-like wobble so the mouth still moves
+            return 0.07 + 0.05 * math.sin(time.time() * 9) * math.sin(time.time() * 4.3) if m.speaking else 0.0
+
+        def moved(x, y):
+            if x is None:
+                app.state.pop("face_pos", None)
+            else:
+                app.state["face_pos"] = [x, y]
+            save_state(app.state)
+
+        pos = app.state.get("face_pos") or CFG.get("face_position") or None
+        style = str(CFG.get("face_style", "3d")).lower()
+        chat = getattr(app, "chat", None)
+        if (style == "3d" and CFG.get("head_docked", True) and self.single and not self._dock_failed
+                and chat is not None and hasattr(chat, "dock_frame")):
+            frame = None
+            try:                                  # head_dock.py: render into a frame inside the main window
+                frame = chat.dock_frame(CFG.get("face_size", 260))
+                if frame is not None:
+                    from head_dock import DockedHead
+                    self.face = DockedHead(frame, self.s, state, level, size=CFG.get("face_size", 260),
+                                           fps=CFG.get("face_fps", 30), shell=CFG.get("face_shell", "white"),
+                                           bg=chat.dock.PANEL, log=log,
+                                           get_text=lambda: (getattr(app.mouth, "text", ""),
+                                                             getattr(app.mouth, "text_t", 0.0)),
+                                           auto_emotion=CFG.get("face_auto_emotion", True))
+                    return
+            except Exception as e:
+                log("face", f"Docked head unavailable ({e}), floating it instead.")
+                self._dock_failed = True
+                self.face = None
+                try:
+                    chat.dock.hide()
+                except Exception:
+                    pass
+        if style == "3d":
+            try:                                  # GPU head (face3d.py + head.frag); any failure falls back below
+                from face3d import Face3D
+                self.face = Face3D(self.root, self.s, state, level, size=CFG.get("face_size", 260), pos=pos,
+                                   opacity=CFG.get("face_opacity", 1.0), on_moved=moved, log=log,
+                                   fps=CFG.get("face_fps", 30), shell=CFG.get("face_shell", "white"),
+                                   get_text=lambda: (getattr(app.mouth, "text", ""), getattr(app.mouth, "text_t", 0.0)),
+                                   auto_emotion=CFG.get("face_auto_emotion", True))
+                return
+            except Exception as e:
+                log("face", f"3D face unavailable ({e}), using the classic face.")
+        from face import Face
+        self.face = Face(self.root, self.s, state, level, size=CFG.get("face_size", 170), pos=pos,
+                         opacity=CFG.get("face_opacity", 0.85), on_moved=moved, log=log)
 
     def _dock(self, size):
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
@@ -1190,6 +1544,19 @@ class Overlay:
     def tick(self):
         try:
             self.n += 1
+            if self.single or self.want_single:
+                # floating boxes are off: the chat window draws the status; only keep the head on top
+                f = self.face
+                if f is not None and getattr(f, "docked", False) and f.dead and not self._dock_failed:
+                    # the docked head's render thread died: log why and float a head instead (no crash, no loop)
+                    self._dock_failed = True
+                    log("face", f"Docked head stopped ({getattr(f, 'err', None)}), floating it instead.")
+                    self.head.set(False, remember_choice=False)
+                    self.head.set(True, remember_choice=False)
+                elif self.n % 10 == 0 and f and not f.dead and not getattr(f, "docked", False):
+                    f.win.attributes("-topmost", True)
+                self.root.after(120, self.tick)
+                return
             if self.n % 3 == 0:
                 self.blink = not self.blink
             state, detail, elapsed = self.app.status()
@@ -1209,6 +1576,8 @@ class Overlay:
             self._sync_icons()
             if self.n % 10 == 0:
                 self.root.attributes("-topmost", True)
+                if self.face and not self.face.dead and not getattr(self.face, "docked", False):
+                    self.face.win.attributes("-topmost", True)
                 for p in self.panes.values():
                     p.win.attributes("-topmost", True)
         except Exception as e:
@@ -1222,15 +1591,18 @@ CONFIRM_RE = re.compile(r"^(yes,? )?(confirmed?|confirm it|go ahead|do it|yes do
 ACKS = ["Give me a sec.", "Bear with me.", "This one's taking a minute.", "Working on it."]
 START_RE = re.compile(r"(?:initiate|initialise|initialize|start|wake up|morning)\s+(?:aida|ida|ayda|aider|eider|aeda|eda|a\.i\.d\.a|aida mode)|start of (?:the )?day")
 END_RE = re.compile(r"(?:initiate\s+)?end of (?:the )?day|shut ?down for the day")
-LEARN_PROMPT = ("Update the user's speech profile in memory/topics/how_you_talk.md (read it first; edit it in place and "
-                "change nothing else). Below are their NEW spoken lines (transcribed) since the last update. Merge what "
+LEARN_PROMPT = ("Update the user's FULL speech profile in memory/topics/full/how_you_talk.md (read it first; edit it in place). "
+                "Below are their NEW spoken lines (transcribed) since the last update. Merge what "
                 "they show: slang and shortenings with what they mean by each; phrasing habits "
                 "(how they start, ask, end, sentence length); how they sound annoyed vs pleased; their names for apps, "
                 "projects and people. Keep only patterns seen at least twice across the profile and these lines, or "
                 "ones they say are theirs. Ignore obvious speech-recognition mistakes. Keep up to 60 of their distinctive "
-                "words and names, comma-separated, under '## Vocabulary'. Keep the file under about 120 lines, facts "
-                "not prose, no customer, patient or other sensitive data. Add or update a 'Last learned' line with "
-                "today's date and time. Reply with just: ok\n\nNEW LINES:\n{lines}")
+                "words and names, comma-separated, under '## Vocabulary'. Facts not prose, no customer, patient or other "
+                "sensitive data. Add or update a 'Last learned' line with today's date and time. Then, only if something new and "
+                "lasting was learned, update the DISTILLED profile memory/topics/how_you_talk.md (loaded every "
+                "turn): keep its headings, add or merge one short line, never paste examples, and keep the whole "
+                "file under " + str(memory_core.PROFILE_CAP) + " characters (condense or drop the least useful "
+                "lines to make room). Change no other files. Reply with just: ok\n\nNEW LINES:\n{lines}")
 START_PROMPT = ("Start of day (the user said 'initiate AIDA'). Read memory/topics/week_summary.md and memory/topics/todo.md. "
                 "Brief them out loud in under 40 seconds: the few things from the past week worth remembering, "
                 "then today's to-dos, most important first. If both are empty, say so in one line and ask what's on today.")
@@ -1238,8 +1610,11 @@ END_PROMPT = ("End of day (the user said 'initiate end of day'). Go through toda
               "and file it: update memory/topics/technical.md, projects.md, decisions.md and people.md with anything "
               "new or changed; append a dated entry to history.md; update todo.md (mark done, add new, carry over the rest); "
               "add today's summary (about 10 lines, under a '## {day}' heading) to week_summary.md and remove days older "
-              "than 7 days from it. Also update memory/topics/how_you_talk.md from today's lines spoken by the user (their words, slang, "
-              "phrasing; patterns seen at least twice; Vocabulary list). "
+              "than 7 days from it. Also update memory/topics/full/how_you_talk.md from today's lines spoken by the user (their words, slang, "
+              "phrasing; patterns seen at least twice; Vocabulary list), and keep the distilled memory/topics/how_you_talk.md "
+              "in step but under " + str(memory_core.PROFILE_CAP) + " characters. Any new standing rule goes in "
+              "decisions.md (dated, with reason) AND as one short line in memory/topics/core_rules.md (keep it under "
+              + str(memory_core.RULES_CAP) + " characters). "
               "Keep every file tight, no customer, patient or other sensitive data. Then tell them in two short "
               "sentences what you filed and what tops tomorrow's list.")
 
@@ -1248,19 +1623,29 @@ class App:
     def __init__(self):
         self.state = load_state()
         self.mouth = Mouth()
+        SOUNDS.speaking = lambda: self.mouth.speaking          # chime / error blips never cut speech off
         log("setup", f"Voice: {self.mouth.voice_name}")
         log("setup", "Loading speech recognition (first run downloads the model)...")
         self.ears = Ears()
         log("setup", f"Microphone: {self.ears.mic_name} | speech recognition on {self.ears.where}")
+        self.mouth.hold = speech_hold.SpeechHold(self.mouth.q.put, self._user_talking,
+                                                 max_hold_s=float(CFG.get("hold_results_max_s", 180)), log=log)
+        self.ears.gate = echo_guard.EchoGate(lambda: self.mouth.speaking,
+                                             tail_s=float(CFG.get("echo_tail_ms", 600)) / 1000,
+                                             enabled=bool(CFG.get("echo_gate", True)))
         self.brain = Brain(self.state)
         self.memory = Memory()
+        self.working = False                      # set early: the status heartbeat below reads it
+        app_status.start(self)                    # state\app_status.json: lets restart_app.ps1 wait until AIDA has finished talking
         self.unseen = []        # things that happened without Claude (instant commands etc.), passed on next time
         self.recording = False
+        self.restart_countdown = bool(CFG.get("restart_countdown", True))    # config: show the countdown in the chat window
+        self.restart_due = None                # epoch seconds the restart reminder fires; set by _restart_reminder_loop
         self.working = False
         self.transcribing = False
         self.detail = ""
         self.task_started = 0.0
-        self.awaiting_confirm = False
+        self.confirm = confirm_state.ConfirmState()     # 'waiting for your confirmed' banner state
         self.error_msg = ""
         self.error_until = 0.0
         self.last_reply = ""
@@ -1268,26 +1653,151 @@ class App:
         self.feed = collections.deque(maxlen=80)     # main box history: (text, kind)
         self.agents = {}                              # helper agent id -> its box's data
         self.lock = threading.Lock()
+        self.watcher = None                           # proactive watcher (watcher.py), off unless watcher_enabled
+        self.pending_screen = 0.0                     # expiry time while I'm waiting for 'left / middle / right'
+        self.screen_rec = None                        # screen recording via OBS (screen_record.py + obs_control.py)
+        try:
+            import screen_record, obs_control
+            self.screen_rec = screen_record.ScreenRecordController(
+                obs_control.from_config(CFG), speak=lambda t: self.mouth.say(t),
+                autolaunch=bool(CFG.get("obs_autolaunch", True)),
+                notify=lambda kind, t: log("error" if kind == "error" else "system", t))
+            self.screen_rec.choose = self._screen_choice
+            self.screen_rec.watch(2.0)               # follow OBS's real state (stopped/started outside the app)
+        except Exception as e:                        # recording is optional: never stop the assistant starting
+            log("setup", f"Screen recording unavailable: {e}")
         write_hook_settings()
+
+    @property
+    def awaiting_confirm(self):
+        return self.confirm.active                      # expires by itself after 3 minutes
+
+    @awaiting_confirm.setter
+    def awaiting_confirm(self, v):
+        if v:
+            self.confirm.arm(self.confirm.what)
+        else:
+            self.confirm.clear()
 
     # -- what the status box shows
     def status(self):
         if self.recording:
             talking = self.ears.level > float(CFG.get("voice_threshold", 0.015))
-            return ("Listening", "Hearing you" if talking else "Listening\u2026 press ` again to send", None)
+            return ("Listening", "Hearing you" if talking else f"Listening\u2026 press {hotkeys.display(self.hk('ptt'))} again to send", None)
+        ws = self.wake_state()
+        if ws in ("woken", "capturing"):
+            return "Listening", "Open mic: hearing you", None
         if self.transcribing:
             return "Thinking", "Working out what you said", None
         if self.working:
             return "Working", self.detail or "Starting", time.time() - self.task_started
         if self.mouth.speaking:
             return "Speaking", self.last_reply or "", None
-        if self.awaiting_confirm:
-            return "Confirm", "Say 'confirmed' to go ahead, or tell it not to.", None
+        b = self.confirm.banner()
+        if b:
+            return b[0], b[1], None
         if time.time() < self.error_until:
             return "Problem", self.error_msg, None
-        return "Idle", "Press ` to talk", None
+        if ws in ("idle", "followup"):
+            return "Idle", f"Say 'Hey AIDA' or press {hotkeys.display(self.hk('ptt'))}", None
+        return "Idle", f"Press {hotkeys.display(self.hk('ptt'))} to talk", None
+
+    # -- open mic / wake word (wake_word.py). Off unless wake_enabled: true in config.yaml.
+    def wake_state(self):
+        """'off' | 'idle' | 'woken' | 'capturing' | 'followup' | 'unavailable' (hook for the status box / M5 UI)."""
+        w = self.__dict__.get("wake")
+        return w.state if w is not None else "off"
+
+    def _commentary_make(self):
+        """Live commentator (live_commentary.py): separate stateless Haiku looks, spoken via the normal path."""
+        import live_commentary
+        sw = self.__dict__.get("screen_watch")
+        if sw is None:
+            return
+
+        def busy():
+            if self._user_talking():
+                return "user talking"
+            if self.working or self.__dict__.get("transcribing") or self.mouth.speaking:
+                return "turn running"
+            return ""
+
+        def show(line):
+            self.feed.append((line, "say"))
+            log("commentary", line)
+
+        look = live_commentary.ClaudeLook(self.brain.claude, live_commentary.cfg_get(CFG, "live_commentary_model"),
+                                          float(live_commentary.cfg_get(CFG, "live_commentary_timeout_s")), log=log)
+        self.commentary = live_commentary.LiveCommentary(CFG, sw, look, self.mouth.say, show=show,
+                                                         muted_fn=lambda: self.mouth.muted, busy_fn=busy, log=log)
+        if self.commentary.enabled:
+            self.commentary.start()
+
+    def _user_talking(self):
+        """True while the user is mid-speech: talk key held open, or the open mic has woken / is capturing him.
+        Replies wait in speech_hold until this goes False, so they can't blank or abort his words."""
+        return bool(self.__dict__.get("recording")) or self.wake_state() in ("woken", "capturing")
+
+    def _wake_ctx(self):
+        g = self.ears.gate
+        speaking = bool(self.mouth.speaking)
+        blocked = bool(self.recording or self.transcribing or self.working or speaking
+                       or (g is not None and g.blocked()))
+        return blocked, speaking
+
+    def _wake_start(self):
+        def stt(audio):                                  # short wake check: no VAD pass, no vocabulary prompt
+            segs, _ = self.ears.model.transcribe(prep_audio(self.ears.np, audio),language="en", beam_size=1,
+                                                 initial_prompt="Hey AIDA.", without_timestamps=True)
+            return " ".join(s.text.strip() for s in segs).strip()
+
+        def tail_stt(audio):                             # "has he finished?" at pauses: a filler-laden prompt stops
+            segs, _ = self.ears.model.transcribe(        # Whisper deleting a trailing "and um" (it did at 22:37)
+                prep_audio(self.ears.np, audio), language="en", beam_size=1, without_timestamps=True,
+                initial_prompt=wake_word.TAIL_PROMPT)
+            return " ".join(s.text.strip() for s in segs).strip()
+        det = wake_word.make_detector(CFG, stt, log)
+        machine = wake_word.make_machine(CFG, det, tail_fn=tail_stt)
+        self.wake = wake_word.WakeListener(
+            machine, self._wake_ctx, lambda audio, via: self.handle_audio(audio, source="wake"),
+            on_wake=lambda: beep("chime"), device=self.ears.device, rate=self.ears.rate, log=log,
+            wake_log=wake_word.WakeLog(LOG_DIR / "wake.jsonl"))
+        if self.wake.start():
+            log("wake", f"Open mic on ({det.engine} engine). Say 'Hey AIDA'.")
 
     # -- hotkeys
+    def hk(self, name):
+        """Current binding ('ptt' or 'cancel'); falls back to the saved/config value before run() has registered."""
+        m = getattr(self, "hotkey_mgr", None)
+        if m is not None:
+            return m.bound[name]
+        return hotkeys.resolve(self.state, CFG)[name]
+
+    def hotkey_bindings(self):
+        return {"ptt": self.hk("ptt"), "cancel": self.hk("cancel")}
+
+    def set_hotkey(self, name, spec):
+        """Live rebind from the Settings menu. Raises RuntimeError (old key kept) if registering fails."""
+        try:
+            new = self.hotkey_mgr.rebind(name, spec)
+        except RuntimeError as e:
+            log("error", f"Hotkey change failed: {e}")
+            raise
+        self.state[hotkeys.STATE_KEYS[name]] = new
+        save_state(self.state)
+        log("hotkey", f"{hotkeys.LABELS[name]} is now {hotkeys.display(new)}")
+        return new
+
+    def reset_hotkeys(self):
+        for name in ("ptt", "cancel"):
+            self.state.pop(hotkeys.STATE_KEYS[name], None)
+        want = hotkeys.resolve(self.state, CFG)
+        self.hotkey_mgr.rebind("cancel", "")                    # free both keys first so a swap can't collide
+        self.hotkey_mgr.rebind("ptt", want["ptt"])
+        self.hotkey_mgr.rebind("cancel", want["cancel"])
+        save_state(self.state)
+        log("hotkey", "Keys reset to the config.yaml defaults")
+
     def on_toggle(self):
         t = time.time()
         if t - self.last_press < 0.35:        # ignore key repeat
@@ -1300,6 +1810,9 @@ class App:
                 beep("stop")
                 threading.Thread(target=self.handle_audio, args=(audio,), daemon=True).start()
             else:
+                if self.ears.gate:
+                    self.ears.gate.echo_possible(0)    # stamps 'AIDA audible now' before he's cut off
+                    self.ears.gate.barge_in()  # the hotkey wins: don't blank the mic while it winds down
                 self.mouth.stop()              # talking over it shuts it up
                 try:
                     self.ears.start()
@@ -1308,7 +1821,102 @@ class App:
                     beep("error")
                     return
                 self.recording = True
+                self.ptt_end_fired = False
                 beep("start")
+                if CFG.get("ptt_end_words", True):
+                    threading.Thread(target=self._ptt_end_watch, args=(self.ears.stream,), daemon=True).start()
+
+    def _ptt_end_watch(self, stream):
+        """Talk key open: at each pause, transcribe the last few seconds; if he ended on an end word
+        ('send it' / 'over' / "that's it") close the recording as if he'd pressed the key. Pure judgement is
+        wake_word.tail_status; handle_audio strips the word (wake_word.ptt_clean)."""
+        np, ears = self.ears.np, self.ears
+        pause_s, quiet = float(CFG.get("ptt_end_pause_s", 0.6)), float(CFG.get("ptt_end_level", 0.01))
+        # 11 Oct 16:18: 'take all of this over | to my work laptop' sent at 'over' after a 0.6 s breath. Now the end
+        # word must stand apart (gap before it, word timings) AND he must stay quiet for the grace after it.
+        grace_s = float(CFG.get("ptt_end_grace_s", 1.3))
+        grace_nt_s = float(CFG.get("ptt_end_grace_no_timing_s", 2.0))
+        min_gap = float(CFG.get("ptt_end_min_gap_s", 0.5))
+        end_words = CFG.get("wake_end_words") or None
+        last_loud, spoke, checked = time.time(), False, 0.0
+        pending, pending_tail, pending_need = None, "", 0.0   # last_loud stamp of a heard end word, quiet needed
+        while self.recording and ears.stream is stream:
+            time.sleep(0.1)
+            t = time.time()
+            if ears.level > quiet:
+                if pending is not None:
+                    log("system", f"End word '{pending_tail}' was mid-sentence, carrying on listening.")
+                last_loud, spoke, pending = t, True, None
+                continue
+            if pending is not None:
+                if pending == last_loud and t - last_loud >= pending_need:
+                    if self.recording and ears.stream is stream:
+                        log("system", f"Heard end word on the talk key ('{pending_tail}'), "
+                                      f"{t - last_loud:.1f} s quiet after it, sending.")
+                        self.ptt_end_fired = True
+                        self.last_press = 0.0             # not key repeat
+                        self.on_toggle()
+                    return
+                continue
+            if not spoke or t - last_loud < pause_s or checked >= last_loud:
+                continue
+            if getattr(self, "transcribing", False):
+                continue                              # never queue a tail pass behind/alongside the real STT
+            checked = last_loud                       # one check per pause
+            try:
+                frames = list(ears.frames)[-int(4 * ears.rate / max(1, len(ears.frames[0]))) - 1:] \
+                    if ears.frames else []
+                if not frames:
+                    continue
+                audio = np.concatenate(frames)[:, 0]
+                if ears.rate != 16000:
+                    n = int(len(audio) * 16000 / ears.rate)
+                    audio = np.interp(np.linspace(0, len(audio) - 1, n), np.arange(len(audio)),
+                                      audio).astype(np.float32)
+                t0 = time.time()
+                segs, _ = ears.model.transcribe(prep_audio(np, audio), language="en", beam_size=1,
+                                                word_timestamps=True, initial_prompt=wake_word.TAIL_PROMPT)
+                segs = list(segs)
+                tail = " ".join(s.text.strip() for s in segs).strip()
+                words = [(w.word, w.start, w.end) for s in segs for w in (getattr(s, "words", None) or [])]
+                tail_ms = int((time.time() - t0) * 1000)
+            except Exception as e:
+                log("error", f"End-word check failed: {e}")
+                return
+            if wake_word.tail_status(tail, end_words, cancel_words=[]) != "end":
+                continue
+            sign_off = wake_word.end_word_sign_off(words, end_words, min_gap)
+            if sign_off is False:
+                log("system", f"Not sending: end word ran on from the sentence ('{tail}', check {tail_ms} ms).")
+                continue
+            pending, pending_tail = last_loud, tail
+            pending_need = max(pause_s, grace_s if sign_off else grace_nt_s)
+
+    @property
+    def muted(self):
+        return bool(self.mouth.muted)
+
+    def set_muted(self, flag):
+        """Global Mute override (switch or voice command). Not saved: every start is un-muted. Any thread."""
+        flag = bool(flag)
+        if flag == self.muted:
+            return flag
+        self.mouth.set_muted(flag)             # the echo guard is NOT released: I am still 'speaking', just silently
+        log("system", "Muted. I keep talking silently; unmute picks up where I've got to." if flag
+            else "Unmuted. Audible again from where the speech has got to.")
+        return flag
+
+    def play_test_sounds(self):
+        """Settings > Play test sounds / voice 'test sounds': start, stop, error and the chime once each."""
+        def run():
+            if not SOUNDS.enabled:
+                log("system", "Sounds are switched off (sounds: false in config.yaml); playing the test anyway.")
+            else:
+                log("system", "Playing test sounds: start, stop, error, chime.")
+            for kind in ("start", "stop", "error", "chime"):
+                SOUNDS.play(kind, force=True)
+                time.sleep(0.7)
+        threading.Thread(target=run, daemon=True).start()
 
     def on_cancel(self):
         self.agents.clear()                    # closes the helper boxes
@@ -1317,17 +1925,56 @@ class App:
             self.mouth.say("Cancelled.")
 
     # -- one utterance
-    def handle_audio(self, audio):
+    def handle_audio(self, audio, source="ptt"):
+        """source: 'ptt' (talk key) or 'wake' (open mic, wake_word.py). Wake speech is silent when empty and can
+        never write the 'confirmed' token (wake_word.confirm_allowed)."""
         if len(audio) < 16000 * 0.4:
             return
+        vt = timing_log.TurnTimer("voice")          # clock starts when he stops talking
+        vt.mark("stt_start")
         self.transcribing = True
+        stt_t0 = time.time()
         try:
             text = self.ears.transcribe(audio)
         finally:
             self.transcribing = False
+            vt.mark("stt_end")
+        stt_s = time.time() - stt_t0
+        if stt_s > float(CFG.get("stt_slow_log_s", 1.5)):
+            threading.Thread(target=log_slow_stt, args=(stt_s, len(audio) / 16000.0), daemon=True).start()
+        g = getattr(self.ears, "gate", None)    # only filter when AIDA could actually be in this recording
+        if text and CFG.get("echo_filter", True) and (
+                g is None or not CFG.get("echo_filter_only_if_heard", True)
+                or g.echo_possible(len(audio) / 16000.0, float(CFG.get("echo_margin_s", 1.5)))):
+            cleaned, changed = SPOKEN.clean(text)
+            if changed:
+                log("echo", f"removed own voice from transcript: '{text}' -> '{cleaned}'")
+                if not cleaned:
+                    log("echo", "ignored own voice")
+                    return
+                text = cleaned
+        if source == "wake" and text:
+            text = wake_word.strip_wake_phrase(text, CFG.get("wake_aliases") or None)
+            text, cancelled = wake_word.clean_command(text, CFG.get("wake_end_words") or None,
+                                                      CFG.get("wake_cancel_words") or None)
+            if cancelled:
+                log("wake", "Discarded: he said cancel / never mind.")
+                return
         if not text:
+            if source == "wake":
+                return                          # false wake or nothing said: stay silent
             self.mouth.say("Didn't catch that.")
             return
+        is_confirm = bool(CONFIRM_RE.match(text.strip()) or confirm_state.is_confirm_variant(text.strip()))
+        if source == "ptt" and CFG.get("ptt_end_words", True):  # 'yes, restart, send it' -> 'yes, restart'
+            fired, self.ptt_end_fired = bool(self.__dict__.get("ptt_end_fired")), False
+            text = wake_word.ptt_strip_if_fired(text, fired, CFG.get("wake_end_words") or None, is_confirm)
+        if is_confirm and not wake_word.confirm_allowed(source):
+            qg = self.__dict__.get("quit_gate")
+            if self.awaiting_confirm or (qg is not None and getattr(qg, "until", None)):
+                log(USER, text)
+                self.mouth.say("Confirmed only counts on the talk key or typed, not the open mic.")
+                return
         log(USER, text)
         self.memory.add(USER, text)
         self.awaiting_confirm = False
@@ -1345,9 +1992,11 @@ class App:
         if self.working:
             self.mouth.say("Still on the last one. Say cancel if you want me to drop it.")
             return
-        if CONFIRM_RE.match(text.strip()):
+        if is_confirm and wake_word.confirm_allowed(source):     # open-mic speech never writes the token
             TOKEN_FILE.write_text(str(time.time() + 180), encoding="utf-8")
+            self.confirm.clear()                # confirmed: the banner goes at once
             log("system", "Confirmation recorded for the next 3 minutes.")
+        self._pending_timer = vt
         threading.Thread(target=self.do_task, args=(text,), daemon=True).start()
 
     def local_command(self, text):
@@ -1356,10 +2005,120 @@ class App:
             self.unseen.append(f"{now()} {USER} said: \"{text}\" -> handled by the program as a voice command")
         return handled
 
+    def quit_app(self, why="requested"):
+        """Shut the whole assistant down (no console means no Ctrl+C). Safe to call from any thread."""
+        log("system", f"Quitting ({why}).")
+        try:
+            w = self.__dict__.get("wake")
+            if w is not None:
+                w.stop()                                 # release the open mic
+        except Exception:
+            pass
+        try:
+            t = self.__dict__.get("screen_text")
+            if t is not None:
+                t.stop()                                 # ends text reading and wipes the RAM context
+        except Exception:
+            pass
+        try:
+            s = self.__dict__.get("screen_watch")
+            if s is not None:
+                s.stop()                                 # ends capture and wipes the RAM ring
+        except Exception:
+            pass
+        try:
+            self.mouth.stop()
+            self.brain.stop()
+        except Exception:
+            pass
+        ov = getattr(self, "overlay", None)
+        try:
+            if ov is not None:
+                ov.root.after(0, ov.root.destroy)        # ends mainloop; run() returns and __main__ exits
+        except Exception:
+            pass
+        threading.Timer(4.0, os._exit, args=(0,)).start()   # backstop if Tk or a thread refuses to stop
+
+    def _quit_gate_check(self, text):
+        """Voice / typed 'quit' needs a spoken or typed 'confirmed' next (same idea as the guard's shutdown rule)."""
+        if windowless is None:
+            return False
+        gate = self.__dict__.setdefault("quit_gate", windowless.QuitGate())
+        verdict = gate.handle(text)
+        if verdict == "ask":
+            self.mouth.say("Say confirmed within a minute and I'll shut down.")
+            return True
+        if verdict == "quit":
+            self.quit_app("voice or typed command")
+            return True
+        return False
+
+    # -- screen recording by voice or typed words. Never goes to Claude. The controller speaks the outcome.
+    def _screen_choice(self, labelled, source):
+        """More than one screen and none named. Voice: ask, and take the next utterance as the answer. Window: dialog."""
+        import screen_record
+        chat = getattr(self, "chat", None)
+        if source == "voice" or chat is None:
+            self.pending_screen = time.time() + 45
+            self.mouth.say(screen_record.choice_question(labelled))
+        else:
+            self.overlay.root.after(0, chat.show_screen_chooser, labelled)    # Tk calls belong on the Tk thread
+
+    def _screen_record_command(self, text):
+        ctl = self.screen_rec
+        if ctl is None:
+            return False
+        import screen_record
+        if self.pending_screen:
+            waiting, self.pending_screen = time.time() < self.pending_screen, 0.0
+            if waiting:
+                mon = screen_record.parse_monitor_answer(text)
+                if mon is not None:
+                    pa = getattr(self, "pending_audio", None) or {}
+                    self.pending_audio = None
+                    ctl.start(mon, source="voice", audio_desktop=pa.get("desktop"), audio_mic=pa.get("mic"))
+                    return True
+                if re.fullmatch(r"(ok |okay )?(cancel|never ?mind|forget it|no)\W*", text.lower().strip()):
+                    self.mouth.say("Okay, not recording.")
+                    return True
+        verb, mon, audio = screen_record.parse_record_command_ex(text)
+        if verb is None:
+            return False
+        if verb == "start":
+            audio = audio or {}
+            self.pending_audio = audio or None          # kept in case it has to ask 'which screen?' first
+            r = ctl.start(mon, source="voice", audio_desktop=audio.get("desktop"), audio_mic=audio.get("mic"))
+            if r == "already":
+                self.mouth.say("Already recording.")
+            elif r == "busy":
+                self.mouth.say("One moment, still sorting the last recording request.")
+        elif verb == "stop":
+            r = ctl.stop(source="voice")
+            if r == "not_recording":
+                self.mouth.say("I'm not recording.")
+            elif r == "busy":
+                self.mouth.say("One moment, it's still starting.")
+        else:
+            self.mouth.say(ctl.status_text())
+        return True
+
     def _local_command(self, text):
+        if self._quit_gate_check(text):
+            return True
         t = re.sub(r"[^a-z0-9 ]", "", text.lower()).strip()
         if re.fullmatch(r"(ok |okay )?(stop|stop talking|shut up|quiet|be quiet|shush)", t):
             self.mouth.stop()
+            return True
+        screen_cmd = getattr(self, "_screen_record_command", None)
+        if screen_cmd and screen_cmd(text):
+            return True
+        import mute
+        want_mute = mute.parse_command(t)
+        if want_mute is not None:
+            self.set_muted(want_mute)           # log only: unmuting carries on the current speech, no extra line
+            return True
+        if re.fullmatch(r"(ok |okay )?(play |run )?(the )?test sounds?", t):
+            self.play_test_sounds()
             return True
         if re.fullmatch(r"(cancel|cancel that|abort|stop the task|stop working)", t):
             self.on_cancel()
@@ -1367,6 +2126,11 @@ class App:
         if re.fullmatch(r"(repeat|repeat that|say that again|what did you say)", t):
             self.mouth.say(self.last_reply or "Nothing to repeat yet.")
             return True
+        if re.fullmatch(r"(ok |okay )?(open|show|bring up|bring back) (the |my )?(chat|text|typing) window", t):
+            chat = getattr(self, "chat", None)
+            if chat:
+                self.overlay.root.after(0, chat.show)          # Tk calls belong on the Tk thread
+                return True
         if re.fullmatch(r"(new session|start fresh|fresh start|new conversation|clear the conversation)", t):
             self.brain.reset()
             chime()
@@ -1380,8 +2144,54 @@ class App:
             threading.Thread(target=self.do_task, args=(text, END_PROMPT.format(day=day), "deep"),
                              daemon=True).start()
             return True
-        m = re.search(r"(humou?r|honesty|mirror) (?:setting |level )?(?:to |at )?(\d{1,3})", t)
-        if m and len(t.split()) <= 8:
+        import head_toggle
+        want = head_toggle.parse_command(t)
+        if want is not None:
+            ov = getattr(self, "overlay", None)
+            if ov is not None and getattr(ov, "head", None) is not None:
+                ov.head.request(want)                 # runs on the Tk thread; logs "face: head on/off"
+                self.mouth.say("Head on." if want else "Head off.")
+            else:
+                self.mouth.say("There's no status window, so there's no head to switch.")
+            return True
+        import watch_status
+        if watch_status.parse_save_command(t):            # 11 Oct 2026: dump the watcher's newest frames on request
+            sw = self.__dict__.get("screen_watch")
+            if sw is None:
+                self.mouth.say("The screen watch isn't running, so there's nothing to save.")
+                return True
+            try:
+                saved = watch_status.save_frames(sw)
+                log("watch", "saved watcher frames on request: "
+                    + (", ".join(f"{p.name} ({lab}, {age} s old)" for p, _m, lab, age in saved) or "none in RAM"))
+                self.mouth.say(watch_status.save_reply(saved))
+            except Exception as e:
+                log("error", f"Saving watcher frames failed: {type(e).__name__}: {e}")
+                self.mouth.say("Saving the frames failed. Details are in the window.")
+            return True
+        import live_commentary
+        want = live_commentary.parse_command(t)
+        if want is not None:
+            lc = self.__dict__.get("commentary")
+            if lc is None:
+                self.mouth.say("Commentary needs the screen watch on, and it isn't.")
+            else:
+                lc.set_enabled(want)
+                log("commentary", "live commentary " + ("on" if want else "off"))
+                self.mouth.say("Commentary on. Try not to die." if want else "Commentary off.")
+            return True
+        m = re.fullmatch(r"(?:ok |okay )?(?:turn )?(?:the )?watcher (on|off)", t)
+        if m:
+            try:
+                self._watcher_set(m.group(1) == "on")
+                self.mouth.say("Watcher on." if m.group(1) == "on" else "Watcher off.")
+            except Exception as e:
+                log("error", f"Watcher failed: {e}")
+                self.mouth.say("The watcher won't start. Details are in the window.")
+            return True
+        t_set = re.sub(r"\b(?:a|one) hundred\b", "100", t)       # "honesty, a hundred percent" -> "honesty, 100 percent"
+        m = re.search(r"(humou?r|honesty|mirror),? (?:setting |level )?(?:to |at )?(\d{1,3})", t_set)
+        if m and len(t_set.split()) <= 8:
             which = {"hon": "honesty", "mir": "mirror"}.get(m.group(1)[:3], "humour")
             n = max(0, min(100, int(m.group(2))))
             self.state[which] = n
@@ -1441,12 +2251,12 @@ class App:
             self._agent_event(kind, info)
         elif kind == "text":
             self.feed.append((clip(info, 400), "say"))
-            log("note", clip(info, 300))
+            log("Claude", info)
             self.memory.add("AIDA", f"(after the reply) {info}")
             busy = any(a["status"] == "Working" for a in self.agents.values())
             if self.working or busy or re.search(r"\[quiet\]", info, re.I):
                 return
-            if re.fullmatch(r"\s*\[done\]\s*", info, re.I):
+            if is_marker(info):
                 chime()
                 return
             spoken = re.sub(r"\[(?:done|quiet)\]", "", info, flags=re.I).strip()
@@ -1470,14 +2280,16 @@ class App:
         if t:
             t.join(2)
 
-    def do_task(self, text, prompt=None, mode=None):
+    def do_task(self, text, prompt=None, mode=None, speak=True):
         if self.working:
             return
         self._stop_drain()                     # only one reader of the session at a time
+        self.confirm.clear()                   # a new job starts: any old 'waiting for confirmed' is stale
         self.detail = "Starting"
         self.task_started = time.time()
         self.feed.clear()
-        self.agents.clear()                    # last job's helper boxes close when a new job starts
+        for aid in [k for k, a in self.agents.items() if a.get("status") != "Working"]:
+            del self.agents[aid]               # finished helpers' boxes close when a new job starts; running ones stay
         self.working = True
         done = threading.Event()
         steps = []
@@ -1488,12 +2300,12 @@ class App:
             first = float(CFG.get("ack_after_s", 8))
             if done.wait(first):
                 return
-            if not self.mouth.speaking and not self.recording:
+            if speak and not self.mouth.speaking and not self.recording:
                 self.mouth.say(random.choice(ACKS))
             waited = first
             while not done.wait(15):
                 waited += 15
-                if waited >= 120 and int(waited) % 180 < 15 and not self.mouth.speaking and not self.recording:
+                if speak and waited >= 120 and int(waited) % 180 < 15 and not self.mouth.speaking and not self.recording:
                     self.mouth.say("Still at it.")
 
         threading.Thread(target=nudges, daemon=True).start()
@@ -1515,7 +2327,7 @@ class App:
             elif kind == "mode":
                 log("system", "Using " + info)
             elif kind == "blocked":
-                self.awaiting_confirm = True
+                self.confirm.arm(info)
                 log("system", "Blocked by the safety check until you say 'confirmed'.")
 
         message = prompt or text
@@ -1524,12 +2336,21 @@ class App:
                        + "\n".join(self.unseen[-20:]) + "]\n\n" + message)
             self.unseen.clear()
         run_mode = mode or self._mode(text)
+        timer = getattr(self, "_pending_timer", None)
+        self._pending_timer = None
+        if timer is None or time.time() - (timer.finish().get("ts") or 0) > 60:
+            timer = timing_log.TurnTimer("typed")
+        timer.model = (CFG.get("model_deep", "") if "deep" in run_mode else CFG.get("model", "sonnet")) or "default"
+        self.brain.timer = timer
         try:
-            reply, err = self.brain.ask(message, on_event, run_mode)
+            reply, err = self.brain.ask(message, on_event, run_mode, classify_text=text)
         except Exception as e:
             reply, err = None, str(e)
+        self.brain.timer = None
+        timer.mark("result")
         done.set()
         self.working = False
+        self.confirm.clear()                   # the job that was blocked has ended; the reply may re-arm it below
         if run_mode == "normal" and not self.brain.cancelled:
             self._start_drain()                # background helpers keep updating their boxes
         else:
@@ -1545,27 +2366,127 @@ class App:
             self.awaiting_confirm = False
             return
         if reply:
-            quiet = bool(re.fullmatch(r"\s*\[done\]\s*", reply, re.I))
-            reply = re.sub(r"\[done\]", "", reply, flags=re.I).strip()
-            if re.search(r"\bconfirm", reply, re.I):
-                self.awaiting_confirm = True
+            quiet = is_marker(reply)
+            reply = re.sub(r"\[(?:done|quiet)\]", "", reply, flags=re.I).strip()
+            asked = confirm_state.reply_asks_confirm(reply)
+            if asked:                          # only a reply that really asks for 'confirmed' shows the banner
+                self.confirm.arm(asked)
+            else:
+                q = confirm_state.reply_question(reply)
+                if q:                          # an ordinary question: neutral 'Your turn', no 'confirmed' hint
+                    self.confirm.ask(q)
             log("Claude", reply or "[done]")
             self.memory.add("AIDA", reply or "(done, no reply needed)")
             if quiet or not reply:
                 chime()
+                timer.write(TIMING_FILE)
                 return
             self.last_reply = for_speech(reply)
-            self.mouth.say(self.last_reply)
+            timer.mark("reply_ready")
+            if speak:                          # typed turns can be set to reply in text only
+                self.mouth.say(self.last_reply, timer)      # the mouth closes the timing line when audio ends
+            else:
+                timer.write(TIMING_FILE)
         else:
+            timer.write(TIMING_FILE)
             log("error", err or "no reply")
             self.memory.add("error", err or "no reply")
             beep("error")
             self.error_msg = clip(err or "No reply", 150)
             self.error_until = time.time() + 20
-            if err and re.search(r"authenticat|log ?in|oauth", err, re.I):
+            if not speak:
+                pass
+            elif err and re.search(r"authenticat|log ?in|oauth", err, re.I):
                 self.mouth.say("Claude Code has logged out. Open a terminal, run claude, and type slash login.")
             else:
                 self.mouth.say("That failed. The details are in the window.")
+
+    # -- typed turn from the chat window (chat_window.py): same path as a spoken one, flagged as typed.
+    # `text` is what the user typed (shown, logged, matched against commands); `message` is what Claude gets
+    # (text plus attachment paths); speak=False keeps the reply to text.
+    def text_turn(self, text, message=None, speak=True):
+        log(USER + " (text)", text)
+        self.memory.add(USER + " (text)", text)
+        self.awaiting_confirm = False
+        if self.local_command(text):
+            return
+        inst = instant_command(text)
+        if inst:
+            desc, cmd = inst
+            run_instant(cmd)
+            chime()
+            log("instant", desc)
+            self.memory.add("AIDA", f"(instant) {desc}")
+            self.unseen.append(f"{now()} {USER} typed: \"{text}\" -> the program did it instantly, without you: {desc}")
+            return
+        if self.working:
+            log("system", "Still on the last one. Say or type cancel if you want me to drop it.")
+            return
+        if CONFIRM_RE.match(text.strip()) or confirm_state.is_confirm_variant(text.strip()):          # he typed it himself, so it counts like the spoken word
+            self.confirm.clear()
+            TOKEN_FILE.write_text(str(time.time() + 180), encoding="utf-8")
+            log("system", "Confirmation recorded for the next 3 minutes.")
+        threading.Thread(target=self.do_task, args=(text, message if message != text else None, None, speak),
+                         daemon=True).start()
+
+    # -- text turn from the user's phone (phone_link.py); no speech, the reply goes back as text
+    def phone_ask(self, text):
+        with self.lock:
+            if self.working:
+                return "Still on a job at the desk. Try again in a minute."
+            self.working = True
+        self._stop_drain()
+        self.detail, self.task_started = "Message from phone", time.time()
+        shown = text.split("]\n", 1)[-1]
+        log(USER + " (phone)", shown)
+        self.memory.add(USER + " (phone)", shown)
+        run_mode = self._mode(shown)
+        try:
+            reply, err = self.brain.ask(text, lambda kind, info: None, run_mode)
+        except Exception as e:
+            reply, err = None, str(e)
+        finally:
+            self.working = False
+        if run_mode == "normal" and not self.brain.cancelled:
+            self._start_drain()
+        reply = re.sub(r"\[(?:done|quiet)\]", "", reply or "", flags=re.I).strip()
+        log("Claude", f"(to phone) {reply or err or 'no reply'}")
+        self.memory.add("AIDA", f"(to phone) {reply or err or 'no reply'}")
+        return reply or ("That failed at the PC." if err else "Done.")
+
+    # -- proactive watcher: observes and queues prompts only (see watcher.py)
+    def _watcher_idle(self):
+        return not (self.working or self.recording or self.transcribing or self.mouth.speaking
+                    or self.awaiting_confirm or time.time() - self.last_press < 5)
+
+    def _watcher_submit(self, prompt, name, detail):
+        """Called by the watcher thread. Queues a system-originated turn, only if the assistant is idle."""
+        if not self._watcher_idle():
+            return False
+        msg = (f"[SYSTEM-ORIGINATED TURN: the proactive watcher '{name}' fired ({detail}). The user did not say this "
+               "and is not necessarily at the desk. Observe only; do not send, post or delete anything. If there is "
+               "nothing worth saying, reply exactly [quiet]. Keep any spoken reply to one or two short sentences.]\n\n"
+               + prompt)
+        log("watcher", f"{name}: {detail}")
+        self.memory.add("system", f"Watcher '{name}' fired: {detail}")
+        threading.Thread(target=self.do_task, args=(prompt, msg, "normal"), daemon=True).start()
+        return True
+
+    def _watcher_set(self, on):
+        """Turn the watcher on or off at runtime (also remembered in state.json)."""
+        self.state["watcher_enabled"] = bool(on)
+        save_state(self.state)
+        if on:
+            if self.watcher is None:
+                import watcher
+                self.watcher = watcher.Watcher(
+                    CFG.get("watcher_file") or None, is_idle=self._watcher_idle, submit=self._watcher_submit,
+                    quiet_hours=CFG.get("watcher_quiet_hours", ""), poll_s=CFG.get("watcher_poll_s", 5))
+                for e in self.watcher.errors:
+                    log("watcher", "watches file problem: " + e)
+            self.watcher.start()
+        elif self.watcher is not None:
+            self.watcher.stop()
 
     # -- OPT-IN: keep the learned memory (assistant/memory/topics) in your OWN GitHub repo (the `origin` remote)
     def _sync(self):
@@ -1577,9 +2498,34 @@ class App:
         topics = "assistant/memory/topics"
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+        def gh_env():
+            # gh's git credential helper uses the ACTIVE gh account and ignores the URL user, so pass the token of
+            # the remote's account explicitly. Any problem -> None (plain behaviour). The token is never logged.
+            try:
+                url = subprocess.run(["git", "-C", str(HERE), "remote", "get-url", "origin"], capture_output=True,
+                                     text=True, timeout=5, creationflags=flags).stdout.strip()
+                m = re.match(r"https?://(?:([^/@:]+)(?::[^/@]*)?@)?[^/]+/([^/]+)/", url)
+                acct = m and (m.group(1) or m.group(2))
+                if not acct:
+                    return None
+                t = subprocess.run(["gh", "auth", "token", "-u", acct], capture_output=True, text=True, timeout=5,
+                                   creationflags=flags)
+                tok = t.stdout.strip()
+                if t.returncode != 0 or not tok:
+                    return None
+                return {**os.environ, "GH_TOKEN": tok}
+            except Exception:
+                return None
+
         def git(*args):
-            return subprocess.run(["git", "-C", str(HERE), *args], capture_output=True, text=True, encoding="utf-8",
-                                  errors="replace", timeout=180, creationflags=flags)
+            env = gh_env() if args[0] in ("fetch", "pull", "push") else None
+            r = subprocess.run(["git", "-C", str(HERE), *args], capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=180, creationflags=flags, env=env)
+            if env:  # belt and braces: never let the token reach a logged message
+                tok = env["GH_TOKEN"]
+                r.stdout = (r.stdout or "").replace(tok, "***")
+                r.stderr = (r.stderr or "").replace(tok, "***")
+            return r
 
         def norm(u):
             u = u.strip().lower().rstrip("/")
@@ -1616,6 +2562,7 @@ class App:
         every = float(CFG.get("restart_reminder_min", 0)) * 60
         if every <= 0:
             return
+        self.restart_due = time.time() + every     # the chat window's countdown reads this (stays put once passed)
         while True:
             time.sleep(every)
             try:
@@ -1666,19 +2613,74 @@ class App:
         if r.returncode != 0:
             log("learn", f"failed: {clip(r.stderr or r.stdout, 200)}")
             return
+        # the loaded profile is read every turn: hold it to the cap even if the model didn't
+        memory_core.enforce_cap(MEM / "topics" / "how_you_talk.md", memory_core.PROFILE_CAP, log=log)
         self.state["learn_upto"] = {"day": day, "t": new[-1][0]}
         save_state(self.state)
         log("learn", f"speech profile updated from {len(new)} new lines")
 
     def run(self):
         import keyboard
-        hot = CFG.get("hotkey", "`")
-        keyboard.add_hotkey(hot, self.on_toggle, suppress=True)
-        keyboard.add_hotkey(CFG.get("cancel_hotkey", "ctrl+`"), self.on_cancel, suppress=True)
-        log("ready", f"Press {hot} to talk, {hot} again to send. Ctrl+C in this window quits.")
+        want = hotkeys.resolve(self.state, CFG)          # saved choice (Settings menu) wins over config.yaml
+        self.hotkey_mgr = hotkeys.HotkeyManager(hotkeys.KeyboardBackend(),
+                                                {"ptt": self.on_toggle, "cancel": self.on_cancel}, want, log=log)
+        hot = hotkeys.display(want["ptt"])
+        how_quit = ("Quit button in the chat window, or say quit and then confirmed, quits." if WINDOWLESS
+                    else "Ctrl+C in this window quits.")
+        log("ready", f"Press {hot} to talk, {hot} again to send. {how_quit}")
         self.mouth.say("Online.")
         threading.Thread(target=self._learn_loop, daemon=True).start()
         threading.Thread(target=self._restart_reminder_loop, daemon=True).start()
+        if self.state.get("watcher_enabled", CFG.get("watcher_enabled", False)):
+            try:
+                self._watcher_set(True)
+                log("watcher", "Proactive watcher is on.")
+            except Exception as e:
+                log("error", f"Watcher failed to start: {e}")
+        if CFG.get("wake_enabled", False):
+            try:
+                self._wake_start()
+            except Exception as e:                       # the open mic is optional: never stop the assistant starting
+                log("error", f"Open mic failed to start: {e}")
+        if CFG.get("screen_watch_enabled", False):       # live screen watch M2: RAM only, quiet, paused while muted
+            try:
+                import screen_watch
+                self.screen_watch = screen_watch.ScreenWatch(
+                    CFG, log=log, paused_fn=lambda: "muted" if self.mouth.muted else "")
+                self.screen_watch.start()
+            except Exception as e:
+                log("error", f"Screen watch failed to start: {e}")
+            if CFG.get("screen_text_enabled", False):    # M3 text tier: log-only hints, RAM only
+                try:
+                    import screen_text
+                    self.screen_text = screen_text.ScreenText(CFG, log=log, watch=self.screen_watch)
+                    self.screen_text.start()
+                except Exception as e:
+                    log("error", f"Screen text failed to start: {e}")
+            try:                                         # live commentator: off until "commentary on"
+                self._commentary_make()
+            except Exception as e:
+                log("error", f"Live commentary failed to set up: {e}")
+            try:                                         # state\watch_status.json: counters only (watch_status_check.py)
+                import watch_status
+                watch_status.start(self, CFG)
+            except Exception as e:
+                log("error", f"Watch status file failed to start: {e}")
+        if CFG.get("phone_link_enabled", False):
+            try:
+                import phone_link
+                self.phone = phone_link.start(self.phone_ask, log)
+            except Exception as e:
+                log("phone", f"phone link failed to start: {e}")
+        try:
+            import helper_ledger
+            lost = helper_ledger.mark_lost()
+            if lost:
+                msg = "Helpers lost in restart: " + "; ".join(f"{j['id']} {j['title']}" for j in lost)
+                log("system", msg)
+                self.memory.add("system", msg)
+        except Exception as e:
+            log("system", f"helper ledger check failed: {e}")
         self.memory.add("system", "Assistant started")
         if CFG.get("overlay", True):
             try:
@@ -1686,6 +2688,18 @@ class App:
             except Exception as e:
                 log("setup", f"Status box unavailable ({e}), console only.")
             else:
+                if chat_window and CFG.get("chat_window", True):
+                    try:
+                        single = self.overlay.want_single
+                        self.chat = chat_window.ChatWindow(self.overlay.root, self, save_state, log, single=single)
+                        if single:
+                            self.overlay.go_single()
+                    except Exception as e:
+                        log("setup", f"Chat window unavailable ({e}).")
+                        self.chat = None
+                        self.overlay.go_legacy()
+                elif self.overlay.want_single:
+                    self.overlay.go_legacy()
                 self.overlay.root.mainloop()
                 log("system", "Shutting down.")
                 return
@@ -1714,3 +2728,5 @@ def write_hook_settings():
 
 if __name__ == "__main__":
     App().run()
+    if WINDOWLESS:
+        os._exit(0)          # nothing left to wait for and no console to close: end the process for certain

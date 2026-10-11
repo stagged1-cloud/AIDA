@@ -6,3 +6,18 @@ keyboard
 pywin32
 pyyaml
 kokoro-onnx
+# 3D head (face3d.py, head.frag)
+moderngl
+pillow
+# screen watch / screen text / native app control (all optional features, off by default)
+mss
+psutil
+comtypes
+uiautomation
+winrt-runtime
+winrt-Windows.Media.Ocr
+winrt-Windows.Graphics.Imaging
+winrt-Windows.Storage.Streams
+winrt-Windows.Globalization
+winrt-Windows.Foundation
+winrt-Windows.Foundation.Collections

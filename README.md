@@ -151,6 +151,24 @@ Claude Code is launched with `--dangerously-skip-permissions` so it can work han
 
 Speech recognition, the voice and your memory files all run and live on your PC. The only thing sent out is your transcribed text and Claude's tool activity, to Claude (Anthropic) through Claude Code, under Anthropic's data policies and your own plan. The installer downloads models from GitHub and Hugging Face. Nothing is sent to the author. Optional GitHub features only talk to your own account.
 
+### Optional screen features (all OFF by default)
+
+Three features look at your screens. None of them runs unless you switch it on in `config.yaml` and restart AIDA.
+
+| Key | What it does | Where your data goes |
+|---|---|---|
+| `screen_watch_enabled` | Samples your monitors a few times a second into a small in-memory ring (about 60 seconds, capped at a few MB) and notices when the screen changes. The other two features need it on. | Frames stay in RAM only. Nothing is written to disk and nothing goes over the network. The one exception is when you say "save a frame": that saves the newest frames as JPEGs to `state\shots`. |
+| `screen_text_enabled` | Reads the text on screen (UI Automation, with Windows' built-in OCR as a fallback) to keep track of what you are working on, and logs likely typos. Log-only for now. | Stays on your PC. Hints go to `logs\context_shadow.jsonl`. No network. |
+| `live_commentary_enabled` | Now and then AIDA looks at the screen and makes a short spoken remark, e.g. when your character dies in a game. | Each look sends **one screen frame** to a separate, cheap Claude call (Haiku). It never goes into your main conversation. It costs plan usage (roughly 2k tokens a look) and has hourly and daily caps. Anything on screen, including passwords or work material, can be in that frame. |
+
+To try commentary, set `screen_watch_enabled: true`, restart AIDA, then say **"commentary on"** (or "commentary off"). `live_commentary_enabled: true` makes it start already on. Leave all three off on a work PC unless you are allowed to send screen content to Claude.
+
+AIDA also has the open mic ("Hey AIDA", `wake_enabled`, on by default; set it to `false` to use only the talk key), an optional 3D head (`face_style: "3d"`) and optional OBS screen recording (`install_obs.ps1`).
+
+### Updating an existing install
+
+Run the install line again, or from your AIDA folder: `git pull upstream main`, then start AIDA. `start.bat` installs any new packages the first time. Your `config.yaml` is never overwritten. New settings use the defaults built into the code, and the screen features above stay off. To see the new options, compare your `config.yaml` with `config.example.yaml`.
+
 ## Troubleshooting
 
 | Symptom | Fix |

@@ -38,6 +38,106 @@ projects_dir: ""            # blank = the folder above this one (only used to sh
 claude_path: ""             # blank = find `claude` on PATH (install.ps1 installs Claude Code)
 model: "sonnet"             # fast everyday model ("haiku" = fastest, "" = Claude Code default)
 model_deep: ""              # used when you say "think hard" ("" = Claude Code default, the heavyweight)
+effort: "low"               # Claude Code reasoning effort: low|medium|high|xhigh|max ("" = Claude Code default). "think hard" always uses high.
+fast_simple_turns: true     # simple orders/chit-chat switch the live session to fast_model (fast_turns.py); false = always `model`
+fast_model: "claude-haiku-5-5"
+fast_switch_timeout_s: 5    # no reply to the switch in time = stay on the current model (logged)
+sounds: true                # start/stop beeps, error beep and the chime (generated WAVs in state/sounds); false = silent. Mute does not affect them. Settings > Play test sounds checks them
+echo_gate: true             # blank the mic while AIDA is talking (and echo_tail_ms after), so it cannot hear itself; pressing ` to talk over it still works
+echo_tail_ms: 600           # how long the mic stays blanked after AIDA stops (room echo, speaker tail)
+echo_filter: true           # strip anything from your transcript that AIDA itself said in the last echo_window_s seconds
+echo_window_s: 90           # how far back to look for AIDA's own words
+echo_filter_only_if_heard: true  # only run the echo filter if AIDA was speaking during your recording (stops it deleting you quoting him)
+echo_margin_s: 1.5          # ...or within this many seconds of it starting
+echo_min_words: 4          # a run of at least this many identical words counts as an echo (shorter bits like "confirmed" always pass)
+# --- open mic: say "Hey AIDA" instead of pressing the key (wake_word.py). Off by default; takes effect on restart.
+wake_enabled: true         # true = mic stays open, nothing is kept or sent until "Hey AIDA" is heard; "confirmed" still needs the key
+wake_engine: "auto"         # auto | whisper | livekit (livekit needs a trained hey-aida model in wake_model)
+wake_model: ""              # path to a trained "hey aida" .onnx (livekit-wakeword); blank = Whisper fallback
+wake_threshold: 0.6         # livekit engine score needed (ignored by the Whisper fallback)
+wake_followup_s: 8          # after a spoken reply, talk again within this many seconds without saying "Hey AIDA"; 0 = off
+wake_cooldown_s: 1.5        # ignore new wake words for this long after a turn
+wake_min_rms: 0.006         # mic level that counts as speech for the open mic (raise if room noise keeps waking it)
+# Patience: how long the open mic waits before deciding you have finished talking (talk key is unaffected).
+wake_end_silence_s: 8       # quiet needed to end a normal sentence (plus grace = 10 s); Whisper hears "what else," mid-thought as finished, so this must cover thinking pauses. Say "over" to send fast
+wake_end_silence_max_s: 10  # if you trail off on "um", "and", "so", "because", "the"... it waits up to this instead
+wake_grace_s: 2             # extra quiet added on top before sending, in case you pick back up; 0 = snappier
+wake_max_utterance_s: 120   # hard cap: one turn is sent after this many seconds even if you are still going
+wake_end_words: ["over", "send it", "that's it"]            # say one at the end to send straight away (word is dropped)
+ptt_end_words: true      # talk key too: ending on one of wake_end_words at a pause sends straight away (word dropped)
+ptt_end_min_gap_s: 0.5   # the end word must have this much pause before it ('take all of this over' in one breath doesn't count)
+ptt_end_grace_s: 1.3     # then this much quiet after it before sending; speaking again cancels
+ptt_end_grace_no_timing_s: 2.0  # quiet needed when word timings are unavailable
+stt_slow_log_s: 1.5      # log GPU load when speech recognition takes longer than this
+wake_cancel_words: ["cancel that", "never mind", "forget it"]  # say only this to throw the turn away, nothing sent
+wake_aliases: ["hey aida", "hey ada", "hey ida", "hey ayda", "hey aider", "hey eider", "hi aida", "ok aida", "okay aida", "hey aidan"]
+# --- live screen watch (screen_watch.py, M2). RAM only: no frames on disk, no model or network calls. Takes effect on restart.
+screen_watch_enabled: false       # true = sample the screens into a RAM ring with change detection (log counters only)
+screen_watch_active_interval_s: 1.0  # sample rate just after a change
+screen_watch_idle_interval_s: 5.0    # sample rate when the screens are still
+screen_watch_active_hold_s: 10.0     # how long to stay fast after a change
+screen_watch_ring_seconds: 60        # kept frames older than this are dropped
+screen_watch_ring_frames: 10         # kept frames per monitor
+screen_watch_ring_mb: 4              # cap for the whole ring
+screen_watch_threshold: 0.005        # share of the screen that must change (0.5%)
+screen_watch_settle: 2               # still samples needed after a change before it counts
+screen_watch_monitors: "all"         # "all" or a list like [1, 2]
+screen_watch_pause_on_fullscreen: false  # The user 11 Oct 2026: capture everything, fullscreen apps and games included
+screen_watch_game_names: ["wow.exe", "wowclassic.exe", "wowb.exe", "wowt.exe"]
+watch_status_enabled: true           # state\watch_status.json (counters/ages only); check with python watch_status_check.py
+watch_status_interval_s: 10          # rewrite the status file this often
+# --- live screen text (screen_text.py + context_watch.py, M3). LOG ONLY: would-be hints go to
+# logs/context_shadow.jsonl; no popup, no speech, no network. Needs screen_watch_enabled too. Takes effect on restart.
+screen_text_enabled: false        # true = read focused text / OCR and log near-miss hints
+screen_text_mode: log_only           # the only mode built; anything else refuses to start
+screen_text_min_interval_s: 2.0      # one pass at most this often
+screen_text_cpu_max_pct: 60          # skip a pass when total CPU is above this
+screen_text_ocr_enabled: true        # OCR fallback (Windows OCR) when UI Automation has no screen text
+screen_text_ocr_min_interval_s: 30.0 # at most one OCR burst this often
+screen_text_ocr_max_pixels: 2100000  # bigger windows are downscaled before OCR
+screen_text_context_ttl_s: 900       # forget on-screen entities after this long
+screen_text_hint_threshold: 0.7      # lowest confidence that gets logged
+# --- live commentary (live_commentary.py). Needs screen_watch_enabled. One frame per look goes to a separate,
+# stateless Haiku call (never the main session, no session file). Say "commentary on" / "commentary off".
+live_commentary_enabled: false      # start state after a restart; voice command switches it
+live_commentary_interval_s: 20       # one look at most this often (skipped when the screen hasn't changed)
+live_commentary_min_gap_s: 45        # least time between spoken lines (deaths may cut in after 15 s)
+live_commentary_max_per_hour: 120    # hard cap on looks (about 2k tokens, $0.0004, 3 s each, measured 11 Oct)
+live_commentary_max_per_day: 800
+live_commentary_model: "claude-haiku-5-5"
+chat_window: true           # dark text window: type to AIDA, drop/paste files and screenshots (say "open the chat window" if you close it)
+single_window: true         # status strip + helper panel live inside the chat window (no floating boxes); false or no chat window = the old floating boxes
+head_docked: true            # draw the 3D head inside the main window (head_dock.py); false or any failure = the old floating head
+face_enabled: true          # floating animated AIDA face that mimics it speaking (drag it; double-click shrinks it to a dot; right-click for menu)
+face_style: "3d"             # "3d" = glossy GPU head with emotions (face3d.py + head.frag); "classic" = the old flat face. 3d falls back to classic if the GPU path fails
+face_size: 260              # pixels, at 100% Windows scaling (the 3D window includes room for the glow and shadow)
+face_position: []           # [x, y] screen pixels; empty = bottom-right of the main screen. A position you drag it to is remembered and wins
+face_opacity: 1.0           # 0.2 (ghostly) ... 1.0 (solid); the 3D head already has soft edges, so 1.0 looks best
+face_fps: 30                # 3D head frame rate (10..60); 30 costs about 1-2% of one CPU core
+face_shell: "white"         # 3D head shell colour: "white", "pearl" or "graphite"
+face_auto_emotion: true     # 3D head picks an emotion from each spoken reply (sorry/failed = sad, done = happy, swearing = deadpan, ? = curious)
+# Note (not a setting): the 3D head runs on whichever GPU Windows gives python.exe (usually the NVIDIA one if you have it).
+#   To save battery, Settings > System > Display > Graphics > add .venv\Scripts\python.exe > Power saving.
+#   That setting picks the OpenGL/DirectX adapter only; CUDA speech recognition should be unaffected (untested).
+
+# phone link (Telegram bot): off by default; secrets live in state/phone_secrets.env or env vars, never here
+phone_link_enabled: false
+
+# --- proactive watcher (watcher.py): speaks up on timers, file changes and screen changes. Off until you switch it on.
+watcher_enabled: false      # or say "watcher on" / "watcher off" (voice choice is remembered and wins over this)
+watcher_file: ""            # blank = state/watcher/watches.yaml (local only, created from watches.example.yaml)
+watcher_quiet_hours: "23:00-07:00"   # UK time; nothing is delivered in this window ("" = never quiet)
+watcher_poll_s: 5           # how often triggers are checked (screen checks are local, no model call)
+
+# --- OBS screen recording (obs_control.py): needs OBS Studio 28+ with Tools > WebSocket Server Settings > Enable.
+obs_host: localhost
+obs_port: 4455
+obs_autolaunch: true        # start OBS (minimised) automatically when a recording is requested and it isn't running
+obs_password: ""          # the WebSocket server password if you set one in OBS (never logged)
+obs_audio_desktop: true     # default: record PC sound (everything the PC plays, incl. AIDA's voice). The record dialog / voice commands change it and the last choice is remembered in state/obs_audio.json
+obs_audio_mic: false        # default: record the microphone
+obs_mic_device: ""          # OBS device_id of the microphone to use ("" = Windows default); chosen in the record dialog
+obs_record_dir: ""        # where OBS saves recordings. "" = "C:\Users\<you>\AIDA Recordings". NOT Videos/Documents/Desktop: Defender Controlled Folder Access blocks OBS there
 deep_phrases: ["think hard", "think about it properly", "use the big model"]
 mcp_keywords: ["email", "e-mail", "gmail", "inbox", "calendar", "meeting", "diary", "drive", "google doc", "google sheet", "jira", "confluence", "connector"]
 humour: 60                  # percent; change by voice: "humour setting 75"

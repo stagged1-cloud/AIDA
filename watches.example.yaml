@@ -1,0 +1,61 @@
+# Example watches. The watcher copies this to state/watcher/watches.yaml (gitignored, local only) the first time it
+# runs; edit THAT copy. Changes are picked up within a few seconds, no restart needed.
+# Anything company-internal (work screens, tickets) belongs in the local copy only, never in this file.
+#
+# Fields: name, type (timer | file | screen), enabled, cooldown_s, prompt, then the type's params.
+# In a prompt, {detail} becomes what tripped it and {name} the watch name.
+# The watcher only observes and queues the prompt; it never sends, posts or deletes anything.
+watches:
+  - name: remind-example
+    type: timer
+    enabled: false
+    time: "17:30"            # UK time, daily. Add date: 2026-10-12 for one-off, or once: true, or weekdays: [mon, fri]
+    cooldown_s: 300
+    prompt: "Reminder for the user: it is half five, time to wrap up. Keep it to one sentence."
+
+  - name: stretch-every-hour
+    type: timer
+    enabled: false
+    every_min: 60
+    cooldown_s: 3000
+    prompt: "Tell the user, in one short line, to get up and stretch."
+
+  - name: new-download
+    type: file
+    enabled: false
+    folder: "C:/Users/YOUR_NAME/Downloads"
+    glob: "*.pdf"
+    mode: new_file
+    cooldown_s: 600
+    prompt: "A new file arrived in Downloads ({detail}). Say what it is in one sentence if you can tell from the name."
+
+  - name: error-in-log
+    type: file
+    enabled: false
+    folder: "C:/Users/YOUR_NAME/AIDA/logs"
+    glob: "*.log"
+    mode: contains
+    pattern: "Traceback|CRITICAL"
+    cooldown_s: 900
+    prompt: "The assistant's own log shows a problem ({detail}). Take a quick look and tell the user what it is."
+
+  - name: left-screen-changed
+    type: screen
+    enabled: false
+    monitor: left            # left | middle | right | primary | 1..n (sorted left to right)
+    mode: diff
+    min_changed: 0.05        # fraction of the 32x18 grid that must change noticeably
+    cooldown_s: 300
+    prompt: "Check the left screen, something changed ({detail}). Tell the user only if it looks important."
+
+  - name: right-screen-red
+    type: screen
+    enabled: false
+    monitor: right
+    mode: colour
+    colour: [200, 30, 30]    # red alert banner
+    tolerance: 45
+    min_fraction: 0.02
+    region: [0, 0, 1, 0.3]   # top 30% of the screen
+    cooldown_s: 600
+    prompt: "Check the right screen, a red alert colour appeared ({detail}). Read it and tell the user what it says."

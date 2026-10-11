@@ -32,3 +32,8 @@ assistant/.claude/settings.json
 # hand-made backups
 *.backup*
 backups/
+
+# runtime state: helper ledger, phone secrets, watcher, chat attachments, saved frames, status files (all local only)
+state/
+assistant/memory/topics/full/
+state/inbox/
